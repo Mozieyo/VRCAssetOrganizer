@@ -1,4 +1,4 @@
-"""Build orchestrator for Booth Organizer.
+﻿"""Build orchestrator for VRC Asset Organizer.
 
 Usage:
     python build.py              # onedir (release)
@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
-MAIN = "booth_organizer/main.py"
+MAIN = "vrc_organizer/main.py"
 
 HIDDEN_IMPORTS = [
     "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
@@ -151,7 +151,7 @@ def strip_bloat(dist_dir: Path) -> int:
 def build():
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--name=BoothOrganizer",
+        "--name=VrcAssetOrganizer",
         "--noconsole",
         "--onedir",
         "--noconfirm",
@@ -172,11 +172,11 @@ def build():
         sys.exit(result.returncode)
 
     # Post-build: strip unused Qt DLLs to shrink bundle and RAM footprint
-    bundle_dir = DIST / "BoothOrganizer"
+    bundle_dir = DIST / "VrcAssetOrganizer"
     saved = strip_bloat(bundle_dir)
     saved_mb = saved / (1024 * 1024)
 
-    exe = bundle_dir / "BoothOrganizer.exe"
+    exe = bundle_dir / "VrcAssetOrganizer.exe"
     if exe.exists():
         size_mb = exe.stat().st_size / (1024 * 1024)
         total_mb = sum(
@@ -189,7 +189,7 @@ def build():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build Booth Organizer")
+    parser = argparse.ArgumentParser(description="Build VRC Asset Organizer")
     parser.add_argument("--clean", action="store_true", help="Clean before build")
     args = parser.parse_args()
 

@@ -1,10 +1,10 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 ## Project
-Booth Organizer is a Windows desktop app for VRchat avatar creators to organize, tag, search, and browse 3D asset files downloaded from Booth.pm. Built with PySide6 + SQLite.
+VRC Asset Organizer is a Windows desktop app for VRchat avatar creators to organize, tag, search, and browse 3D asset files downloaded from online marketplaces. Built with PySide6 + SQLite.
 
 ## Scope
-This is a **single-user desktop tool** — not a server, not a service, not multi-tenant. The target user is a VRchat avatar creator who downloads 10–500+ asset packs from Booth.pm and needs to organize them across multiple Unity projects. The app is a file-organizer with deep format introspection, **not** a Unity replacement and **not** a 3D viewer.
+This is a **single-user desktop tool** — not a server, not a service, not multi-tenant. The target user is a VRchat avatar creator who downloads 10–500+ asset packs from online marketplaces and needs to organize them across multiple Unity projects. The app is a file-organizer with deep format introspection, **not** a Unity replacement and **not** a 3D viewer.
 
 ## Expected User Experience
 - **Import:** Drag .zip / .unitypackage / .blend / .fbx / .png files onto the window. The app scans them, classifies contents, extracts a preview thumbnail, auto-tags from filename/folder analysis, auto-classifies genre, and stores metadata in a local SQLite database. Archives (.zip, .rar) are extracted to a user-configurable library directory so individual files inside can be opened.
@@ -25,7 +25,7 @@ This is a **single-user desktop tool** — not a server, not a service, not mult
 
 ## Architecture
 ```
-main.py → BoothApp (QApplication)
+main.py → VrcApp (QApplication)
         → DatabaseManager (connection pool, WAL mode, thread-local connections)
         → Queries (all SQL lives here — CRUD, search, filtering, settings)
         → MainWindow
@@ -50,7 +50,7 @@ main.py → BoothApp (QApplication)
 - PySide6 — use `Qt.AlignCenter` (not `Qt.AlignmentFlag.AlignCenter`), `Qt.ElideLeft` (not `Qt.TextElideMode.ElideStart`)
 - Paths are `pathlib.Path`, never strings for file paths
 - Signals use `Signal(type, type)` syntax — keep payloads small
-- QSettings accessed via `QSettings()` (no-arg, uses app-wide org/app name) — org: "BoothOrganizer", app: "BoothOrganizer"
+- QSettings accessed via `QSettings()` (no-arg, uses app-wide org/app name) — org: "VrcAssetOrganizer", app: "VrcAssetOrganizer"
 - SQL queries use parameterized `?` placeholders — never f-string interpolation except for `ORDER BY` (whitelist-validated)
 - All DB writes go through `self._db.write_connection()` (acquires mutex); reads use `self._db.connection()` (thread-local)
 - Worker threads: extend `BaseWorker`, override `_run()`, emit `signals.finished` / `signals.error` / `signals.progress`
@@ -95,6 +95,6 @@ main.py → BoothApp (QApplication)
 
 ## Running
 ```bash
-cd BoothOrganizer
-PYTHONPATH="." python booth_organizer/main.py
+cd VrcAssetOrganizer
+PYTHONPATH="." python vrc_organizer/main.py
 ```

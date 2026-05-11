@@ -1,12 +1,12 @@
-{
-  "name": "BoothOrganizer",
+﻿{
+  "name": "VrcAssetOrganizer",
   "version": "0.1.0",
-  "description": "Desktop asset manager for VRchat avatar creators — organizes, tags, and browses 3D assets downloaded from Booth.pm",
+  "description": "Desktop asset manager for VRchat avatar creators — organizes, tags, and browses 3D assets downloaded from online marketplaces",
   "author": "Moji",
   "license": "MIT",
   "platforms": ["Windows"],
   "python": ">=3.11",
-  "entry": "booth_organizer.main:main",
+  "entry": "vrc_organizer.main:main",
 
   "dependencies": {
     "PySide6": ">=6.5.0"
@@ -22,15 +22,15 @@
 
   "build": {
     "command": "python build.py --clean",
-    "output": "dist/BoothOrganizer/BoothOrganizer.exe",
+    "output": "dist/VrcAssetOrganizer/VrcAssetOrganizer.exe",
     "mode": "onedir (folder bundle)",
     "sizeTarget": "<100 MB disk, <150 MB RAM at runtime"
   },
 
   "paths": {
-    "appData": "%LOCALAPPDATA%/BoothOrganizer",
-    "database": "%LOCALAPPDATA%/BoothOrganizer/booth.db",
-    "thumbnails": "%LOCALAPPDATA%/BoothOrganizer/thumbnails",
+    "appData": "%LOCALAPPDATA%/VrcAssetOrganizer",
+    "database": "%LOCALAPPDATA%/VrcAssetOrganizer/vrc_assets.db",
+    "thumbnails": "%LOCALAPPDATA%/VrcAssetOrganizer/thumbnails",
     "library": "user-configurable via Preferences > Assets Storage Path"
   },
 
@@ -128,20 +128,20 @@
 
   "dataModels": {
     "Asset": {
-      "module": "booth_organizer.models.asset",
+      "module": "vrc_organizer.models.asset",
       "fields": ["id", "filename", "filepath", "filetype", "file_size", "mod_time", "date_added", "thumbnail", "thumb_state", "notes", "scan_state", "trash_date"],
       "notes": "filepath is Path object; thumbnail is Optional[Path]; notes is str; scan_state is 'pending' | 'done'; trash_date is Optional[float] for soft-delete"
     },
     "Tag": {
-      "module": "booth_organizer.models.tag",
+      "module": "vrc_organizer.models.tag",
       "fields": ["id", "name", "color"]
     },
     "ScanResult": {
-      "module": "booth_organizer.models.scan_result",
+      "module": "vrc_organizer.models.scan_result",
       "fields": ["id", "asset_id", "entry_name", "entry_type", "entry_size"]
     },
     "ToolConfig": {
-      "module": "booth_organizer.tools.registry",
+      "module": "vrc_organizer.tools.registry",
       "type": "dataclass",
       "fields": ["name", "executable", "args", "filetypes", "enabled"],
       "notes": "args supports {file} {dir} {filename} {project} placeholders"
@@ -158,21 +158,21 @@
       },
       "avatar": {
         "description": "Canonical avatar names from TOP_AVATARS in tag_data.py. Japanese name aliases in JP_AVATAR_TO_EN resolve to the same English tag.",
-        "picker": "AvatarPickerDialog in sidebar.py — searchable checkbox list ordered by real-world Booth popularity"
+        "picker": "AvatarPickerDialog in sidebar.py — searchable checkbox list ordered by community popularity"
       },
       "additional": {
         "description": "All other tags — clothing, accessories, body parts, materials, styles. Auto-tagged from filenames via suggest_tags() using WORD_TO_TAG dictionary and token matching."
       }
     },
     "autoTagging": {
-      "module": "booth_organizer.auto_tagger",
-      "dictionaries": "booth_organizer.tag_data (TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS)",
+      "module": "vrc_organizer.auto_tagger",
+      "dictionaries": "vrc_organizer.tag_data (TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS)",
       "flow": "ImportWorker._import_one → suggest_tags(filename, extracted_path) → suggest_genre(filename, filetype, tag_names) → add all to asset"
     }
   },
 
   "scannerPlugins": {
-    "booth_zip": {"filetype": "booth_zip", "handles": [".zip"], "description": "Scans Booth.pm zip archives — classifies entries, extracts preview thumbnails via _thumb_score heuristic, detects nested .unitypackage and .zip"},
+    "booth_zip": {"filetype": "booth_zip", "handles": [".zip"], "description": "Scans asset marketplace zip archives — classifies entries, extracts preview thumbnails via _thumb_score heuristic, detects nested .unitypackage and .zip"},
     "unitypackage": {"filetype": "unitypackage", "handles": [".unitypackage"], "description": "Parses Unity asset packages (tar.gz format), resolves GUID directory names via /pathname metadata"},
     "rarfile_scanner": {"filetype": "booth_zip", "handles": [".rar"], "description": "Scans RAR archives via rarfile library — requires unrar utility on system PATH"},
     "blendfile": {"filetype": "blend", "handles": [".blend"], "description": "Reads Blender .blend files"},
@@ -243,23 +243,23 @@
   },
 
   "themingModel": {
-    "manager": "ThemeManager (booth_organizer.ui.theme)",
+    "manager": "ThemeManager (vrc_organizer.ui.theme)",
     "modes": ["light (default)", "dark"],
     "mechanism": "QPalette + DWM API for Windows title bar",
     "persistence": "none (resets to light on restart)"
   },
 
   "directoryLayout": {
-    "booth_organizer/": "Application package",
-    "booth_organizer/ui/": "Qt UI components (main_window, sidebar, inspector, thumbnail_grid, body_map, context_menu, tag_dialog, settings_dialog, drop_overlay, theme, chip_button, flow_layout, cover_trainer)",
-    "booth_organizer/database/": "SQLite schema, connection pool, query layer",
-    "booth_organizer/scanner/": "File-type scanners (booth_zip, unitypackage, rarfile_scanner, blend, fbx, image, generic + orchestrator)",
-    "booth_organizer/workers/": "Async QRunnable workers (import, thumb) + base class",
-    "booth_organizer/tools/": "External tool registry and launcher",
-    "booth_organizer/models/": "Data classes (Asset, Tag, ScanResult)",
-    "booth_organizer/auto_tagger.py": "Auto-tag engine — tokenization, WORD_TO_TAG matching, avatar detection, genre classification",
-    "booth_organizer/tag_data.py": "Tag dictionaries — TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS",
-    "booth_organizer/unity_windows.py": "Win32 API for detecting running Unity Editor windows",
+    "vrc_organizer/": "Application package",
+    "vrc_organizer/ui/": "Qt UI components (main_window, sidebar, inspector, thumbnail_grid, body_map, context_menu, tag_dialog, settings_dialog, drop_overlay, theme, chip_button, flow_layout, cover_trainer)",
+    "vrc_organizer/database/": "SQLite schema, connection pool, query layer",
+    "vrc_organizer/scanner/": "File-type scanners (booth_zip, unitypackage, rarfile_scanner, blend, fbx, image, generic + orchestrator)",
+    "vrc_organizer/workers/": "Async QRunnable workers (import, thumb) + base class",
+    "vrc_organizer/tools/": "External tool registry and launcher",
+    "vrc_organizer/models/": "Data classes (Asset, Tag, ScanResult)",
+    "vrc_organizer/auto_tagger.py": "Auto-tag engine — tokenization, WORD_TO_TAG matching, avatar detection, genre classification",
+    "vrc_organizer/tag_data.py": "Tag dictionaries — TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS",
+    "vrc_organizer/unity_windows.py": "Win32 API for detecting running Unity Editor windows",
     "build.py": "PyInstaller build orchestrator with aggressive Qt module exclusions"
   }
 }

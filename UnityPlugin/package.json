@@ -1,14 +1,14 @@
 {
-  "name": "com.boothorganizer.thumbnail",
-  "displayName": "Booth Thumbnail",
+  "name": "com.vrcorganizer.thumbnail",
+  "displayName": "VRC Thumbnail",
   "version": "1.0.0",
   "unity": "2022.3",
-  "description": "Thumbnail generator for Booth Organizer — imports assets dropped from the desktop app and generates preview images via Unity's AssetPreview API.",
+  "description": "Thumbnail generator for VRC Asset Organizer — imports assets dropped from the desktop app and generates preview images via Unity's AssetPreview API.",
   "author": {
-    "name": "Booth Organizer",
-    "url": "https://github.com/user/BoothOrganizer"
+    "name": "VRC Asset Organizer",
+    "url": "https://github.com/Mozieyo/VRCAssetOrganizer"
   },
-  "keywords": ["booth", "thumbnail", "vrchat", "avatar"],
+  "keywords": ["vrc", "thumbnail", "vrchat", "avatar"],
   "category": "Editor",
   "type": "tool"
 }
