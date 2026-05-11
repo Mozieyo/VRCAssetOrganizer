@@ -1,0 +1,14 @@
+{
+  "name": "com.boothorganizer.thumbnail",
+  "displayName": "Booth Thumbnail",
+  "version": "1.0.0",
+  "unity": "2022.3",
+  "description": "Thumbnail generator for Booth Organizer — imports assets dropped from the desktop app and generates preview images via Unity's AssetPreview API.",
+  "author": {
+    "name": "Booth Organizer",
+    "url": "https://github.com/user/BoothOrganizer"
+  },
+  "keywords": ["booth", "thumbnail", "vrchat", "avatar"],
+  "category": "Editor",
+  "type": "tool"
+}

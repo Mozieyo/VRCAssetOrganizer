@@ -1,0 +1,21 @@
+# Build artifacts
+dist/
+build/
+*.spec
+*.pyc
+__pycache__/
+
+# IDE / tools
+.claude/
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Sensitive / local state
+.env
+*.db
+*.db-journal
+*.db-wal

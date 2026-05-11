@@ -1,0 +1,265 @@
+{
+  "name": "BoothOrganizer",
+  "version": "0.1.0",
+  "description": "Desktop asset manager for VRchat avatar creators — organizes, tags, and browses 3D assets downloaded from Booth.pm",
+  "author": "Moji",
+  "license": "MIT",
+  "platforms": ["Windows"],
+  "python": ">=3.11",
+  "entry": "booth_organizer.main:main",
+
+  "dependencies": {
+    "PySide6": ">=6.5.0"
+  },
+  "devDependencies": {
+    "PyInstaller": ">=6.0.0"
+  },
+  "optionalExternalTools": {
+    "Blender": "For opening .blend and .fbx files",
+    "Unity Editor": "For opening .unitypackage and .prefab files",
+    "unrar": "For extracting .rar archives"
+  },
+
+  "build": {
+    "command": "python build.py --clean",
+    "output": "dist/BoothOrganizer/BoothOrganizer.exe",
+    "mode": "onedir (folder bundle)",
+    "sizeTarget": "<100 MB disk, <150 MB RAM at runtime"
+  },
+
+  "paths": {
+    "appData": "%LOCALAPPDATA%/BoothOrganizer",
+    "database": "%LOCALAPPDATA%/BoothOrganizer/booth.db",
+    "thumbnails": "%LOCALAPPDATA%/BoothOrganizer/thumbnails",
+    "library": "user-configurable via Preferences > Assets Storage Path"
+  },
+
+  "database": {
+    "engine": "SQLite 3",
+    "mode": "WAL",
+    "busyTimeout": 5000,
+    "foreignKeys": "ON",
+    "fulltext": "FTS5 (external content table on assets)",
+    "schemaVersion": 4,
+    "schema": {
+      "assets": {
+        "columns": [
+          {"name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT"},
+          {"name": "filename", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "filepath", "type": "TEXT", "constraints": "NOT NULL UNIQUE"},
+          {"name": "filetype", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "file_size", "type": "INTEGER", "constraints": "NOT NULL"},
+          {"name": "mod_time", "type": "REAL", "constraints": "NOT NULL"},
+          {"name": "date_added", "type": "REAL", "constraints": "NOT NULL DEFAULT (strftime('%s', 'now'))"},
+          {"name": "thumbnail", "type": "TEXT"},
+          {"name": "thumb_state", "type": "TEXT", "constraints": "DEFAULT 'pending'"},
+          {"name": "notes", "type": "TEXT", "constraints": "DEFAULT ''"},
+          {"name": "scan_state", "type": "TEXT", "constraints": "DEFAULT 'pending'"},
+          {"name": "trash_date", "type": "REAL"}
+        ],
+        "indexes": ["filetype", "date_added DESC", "thumb_state"]
+      },
+      "tags": {
+        "columns": [
+          {"name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT"},
+          {"name": "name", "type": "TEXT", "constraints": "NOT NULL UNIQUE"},
+          {"name": "color", "type": "TEXT", "constraints": "DEFAULT '#6366f1'"}
+        ],
+        "defaults": [
+          {"name": "Hair", "color": "#ef4444"},
+          {"name": "Head", "color": "#f59e0b"},
+          {"name": "Body", "color": "#3b82f6"},
+          {"name": "Hands", "color": "#a855f7"},
+          {"name": "Feet", "color": "#22c55e"},
+          {"name": "Ears", "color": "#ec4899"},
+          {"name": "Tail", "color": "#f97316"},
+          {"name": "Accs", "color": "#6366f1"}
+        ]
+      },
+      "asset_tags": {
+        "columns": [
+          {"name": "asset_id", "type": "INTEGER", "constraints": "REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "tag_id", "type": "INTEGER", "constraints": "REFERENCES tags(id) ON DELETE CASCADE"},
+          {"name": "", "type": "", "constraints": "PRIMARY KEY (asset_id, tag_id)"}
+        ],
+        "indexes": ["asset_id", "tag_id"]
+      },
+      "scan_results": {
+        "columns": [
+          {"name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT"},
+          {"name": "asset_id", "type": "INTEGER", "constraints": "REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "entry_name", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "entry_type", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "entry_size", "type": "INTEGER"},
+          {"name": "", "type": "", "constraints": "UNIQUE(asset_id, entry_name)"}
+        ],
+        "indexes": ["asset_id"]
+      },
+      "assets_fts": {
+        "type": "VIRTUAL TABLE",
+        "engine": "FTS5",
+        "columns": ["filename", "notes"],
+        "content": "assets",
+        "content_rowid": "id",
+        "triggers": ["AFTER INSERT", "AFTER DELETE", "AFTER UPDATE"]
+      },
+      "settings": {
+        "columns": [
+          {"name": "key", "type": "TEXT", "constraints": "PRIMARY KEY"},
+          {"name": "value", "type": "TEXT"}
+        ]
+      },
+      "schema_version": {
+        "columns": [
+          {"name": "version", "type": "INTEGER", "constraints": "PRIMARY KEY"},
+          {"name": "applied_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"}
+        ]
+      },
+      "cover_labels": {
+        "columns": [
+          {"name": "asset_id", "type": "INTEGER", "constraints": "REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "image_name", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "chosen_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"},
+          {"name": "", "type": "", "constraints": "PRIMARY KEY (asset_id, image_name)"}
+        ]
+      }
+    }
+  },
+
+  "dataModels": {
+    "Asset": {
+      "module": "booth_organizer.models.asset",
+      "fields": ["id", "filename", "filepath", "filetype", "file_size", "mod_time", "date_added", "thumbnail", "thumb_state", "notes", "scan_state", "trash_date"],
+      "notes": "filepath is Path object; thumbnail is Optional[Path]; notes is str; scan_state is 'pending' | 'done'; trash_date is Optional[float] for soft-delete"
+    },
+    "Tag": {
+      "module": "booth_organizer.models.tag",
+      "fields": ["id", "name", "color"]
+    },
+    "ScanResult": {
+      "module": "booth_organizer.models.scan_result",
+      "fields": ["id", "asset_id", "entry_name", "entry_type", "entry_size"]
+    },
+    "ToolConfig": {
+      "module": "booth_organizer.tools.registry",
+      "type": "dataclass",
+      "fields": ["name", "executable", "args", "filetypes", "enabled"],
+      "notes": "args supports {file} {dir} {filename} {project} placeholders"
+    }
+  },
+
+  "tagSystem": {
+    "structure": "Flat list — tags have no parent/child relationships in the DB. TAG_HIERARCHY in tag_data.py is used only for auto-tagging implication (detecting 'Earrings' auto-adds 'Accessory').",
+    "categories": {
+      "genre": {
+        "values": ["Avatar Base", "Outfit & Acce", "Gimmick", "Tools"],
+        "description": "Every asset gets exactly one genre, auto-detected on import via suggest_genre(). User can override in inspector.",
+        "detection": "Keyword-based: GENRE_KEYWORDS in auto_tagger.py + tag set analysis via GENRE_TAG_MAP"
+      },
+      "avatar": {
+        "description": "Canonical avatar names from TOP_AVATARS in tag_data.py. Japanese name aliases in JP_AVATAR_TO_EN resolve to the same English tag.",
+        "picker": "AvatarPickerDialog in sidebar.py — searchable checkbox list ordered by real-world Booth popularity"
+      },
+      "additional": {
+        "description": "All other tags — clothing, accessories, body parts, materials, styles. Auto-tagged from filenames via suggest_tags() using WORD_TO_TAG dictionary and token matching."
+      }
+    },
+    "autoTagging": {
+      "module": "booth_organizer.auto_tagger",
+      "dictionaries": "booth_organizer.tag_data (TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS)",
+      "flow": "ImportWorker._import_one → suggest_tags(filename, extracted_path) → suggest_genre(filename, filetype, tag_names) → add all to asset"
+    }
+  },
+
+  "scannerPlugins": {
+    "booth_zip": {"filetype": "booth_zip", "handles": [".zip"], "description": "Scans Booth.pm zip archives — classifies entries, extracts preview thumbnails via _thumb_score heuristic, detects nested .unitypackage and .zip"},
+    "unitypackage": {"filetype": "unitypackage", "handles": [".unitypackage"], "description": "Parses Unity asset packages (tar.gz format), resolves GUID directory names via /pathname metadata"},
+    "rarfile_scanner": {"filetype": "booth_zip", "handles": [".rar"], "description": "Scans RAR archives via rarfile library — requires unrar utility on system PATH"},
+    "blendfile": {"filetype": "blend", "handles": [".blend"], "description": "Reads Blender .blend files"},
+    "fbx_obj": {"filetype": "fbx", "handles": [".fbx", ".obj"], "description": "Handles FBX and OBJ 3D model files"},
+    "imagefile": {"filetype": "image", "handles": [".png", ".jpg", ".jpeg", ".webp", ".psd", ".tga"], "description": "Image files — used directly as thumbnail source"},
+    "generic": {"filetype": "other", "handles": ["*"], "description": "Fallback for unrecognized file types"}
+  },
+
+  "componentTree": {
+    "MainWindow (QMainWindow)": {
+      "menuBar": ["File (Import Files, Import Folder, Exit)", "Edit (Select All Ctrl+A)", "View (Inspector toggle)", "Preferences (Dark Mode, Unity Path, Storage Path, Settings...)", "Tools (Batch Thumbnails, Manage Tags)", "Help (About)"],
+      "toolbar": ["SearchBar (QLineEdit)", "SearchAll checkbox", "Grid slider (1-10 columns)"],
+      "central": "QSplitter { Sidebar | gridPanel { AssetListView } }",
+      "inspectorDock": "QDockWidget { InspectorPanel }",
+      "statusBar": "QStatusBar { statusLabel | progressBar | cancelButton }"
+    },
+    "Sidebar (QWidget)": {
+      "children": [
+        "BodyMapWidget (interactive avatar silhouette, 2:3 aspect ratio, 180x270 default)",
+        "Genre chip buttons (Avatar Base, Outfit & Acce, Gimmick, Tools) — exclusive toggle, OR logic",
+        "Avatar chip buttons (top 60, filtered to those with count > 0) — OR logic",
+        "Tag chip buttons (AND-logic multi-select, excludes genre + avatar names)",
+        "Clear Filters button",
+        "+ Manage Tags button"
+      ]
+    },
+    "InspectorPanel (QWidget in QScrollArea)": {
+      "children": [
+        "thumbnail QLabel (256x256)",
+        "filename QLabel",
+        "Info QGroupBox (type, size, path, modified, added) — path elided from front",
+        "Genre QGroupBox (ChipToggleButton exclusive group — auto-detected, user-overridable)",
+        "Avatar QGroupBox (ChipToggleButton flow for top 30 avatars — tap to assign, tap to remove)",
+        "Additional Tags QGroupBox (TagChip flow + Add Tag button → popup menu of unassigned non-genre, non-avatar tags)",
+        "Contents QTreeWidget (name, type, size columns) — types show subtype like 'image (psd)', sizes in B/KB/MB/GB",
+        "Notes QPlainTextEdit",
+        "Open With QGroupBox (tool buttons from DEFAULT_TOOL_MAP)"
+      ]
+    },
+    "AssetListView (QListView, IconMode)": {
+      "model": "AssetListModel (QAbstractListModel, PAGE_SIZE=100 lazy loading)",
+      "delegate": "ThumbnailDelegate (QStyledItemDelegate, card = thumbnail + filename label)",
+      "features": ["Drag-and-drop import", "Extended multi-selection", "Right-click context menu", "Empty-state placeholder text", "Center-justified rows via viewport margins"]
+    },
+    "AssetListModel": {
+      "caching": "In-memory _ids list populated by fetchMore(); data() queries DB per-role",
+      "filtering": "or_tag_ids (UNION — body/genre/avatar), and_tag_ids (INTERSECTION — tag tree), filetypes list, search_query (FTS5 prefix)",
+      "sorting": "date_added DESC default, whitelist-validated"
+    }
+  },
+
+  "signalFlow": {
+    "Import": "AssetListView.filesDropped → MainWindow._on_files_dropped → ImportWorker (QRunnable) → signals.finished → model.refresh() + sidebar.refresh() + grid.select_asset_ids()",
+    "Filter": "Sidebar.tag_filter_changed(or_ids, and_ids) → MainWindow._on_tag_filter → _apply_filters → model.set_filter(or_tag_ids, and_tag_ids) → model.refresh()",
+    "Search": "SearchBar.textChanged → _on_search_changed → _apply_filters → model.set_filter()",
+    "TagManagement": "InspectorPanel.tag_added/tag_removed → MainWindow._do_add_tag/_on_tag_removed → _refresh_inspector_for(asset_id) + model.refresh + sidebar.refresh",
+    "GenreChange": "InspectorPanel genre chip toggled → _on_genre_chip_toggled → remove old genre tag + add new genre tag",
+    "ToolLaunch": "InspectorPanel.open_with / AssetContextMenu.open_in → MainWindow._on_open_with → ToolRegistry.get() → ToolLauncher.launch() → subprocess.Popen",
+    "Selection": "AssetListView.selectionModel().selectionChanged → MainWindow._on_selection_changed → InspectorPanel.show_asset(asset)",
+    "BodyMap": "BodyMapWidget.segment_toggled → Sidebar._on_body_segment_toggled → _emit_filters → tag_filter_changed",
+    "ContextMenu": "AssetListView.customContextMenuRequested → MainWindow._on_context_menu → AssetContextMenu.exec()"
+  },
+
+  "threadingModel": {
+    "main": "Qt event loop — all UI widgets, model, delegate",
+    "import": "QThreadPool.globalInstance() — ImportWorker (QRunnable) per batch; WorkerSignals uses AutoConnection to queue emissions to main thread",
+    "toolLaunch": "subprocess.Popen with DETACHED_PROCESS — fire-and-forget, no thread blocking"
+  },
+
+  "themingModel": {
+    "manager": "ThemeManager (booth_organizer.ui.theme)",
+    "modes": ["light (default)", "dark"],
+    "mechanism": "QPalette + DWM API for Windows title bar",
+    "persistence": "none (resets to light on restart)"
+  },
+
+  "directoryLayout": {
+    "booth_organizer/": "Application package",
+    "booth_organizer/ui/": "Qt UI components (main_window, sidebar, inspector, thumbnail_grid, body_map, context_menu, tag_dialog, settings_dialog, drop_overlay, theme, chip_button, flow_layout, cover_trainer)",
+    "booth_organizer/database/": "SQLite schema, connection pool, query layer",
+    "booth_organizer/scanner/": "File-type scanners (booth_zip, unitypackage, rarfile_scanner, blend, fbx, image, generic + orchestrator)",
+    "booth_organizer/workers/": "Async QRunnable workers (import, thumb) + base class",
+    "booth_organizer/tools/": "External tool registry and launcher",
+    "booth_organizer/models/": "Data classes (Asset, Tag, ScanResult)",
+    "booth_organizer/auto_tagger.py": "Auto-tag engine — tokenization, WORD_TO_TAG matching, avatar detection, genre classification",
+    "booth_organizer/tag_data.py": "Tag dictionaries — TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS",
+    "booth_organizer/unity_windows.py": "Win32 API for detecting running Unity Editor windows",
+    "build.py": "PyInstaller build orchestrator with aggressive Qt module exclusions"
+  }
+}
