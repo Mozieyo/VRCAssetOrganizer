@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QPixmap, QFont
+from PySide6.QtGui import QPixmap, QFont, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QWidget, QProgressBar, QFrame, QMessageBox,
@@ -20,32 +20,75 @@ THUMB_SIZE = 160
 
 
 def _extract_archive_image(filepath: Path, entry_name: str) -> bytes | None:
-    """Extract image bytes from within a zip or tar.gz archive."""
+    """Extract image bytes from within an archive or loose image file."""
     suffix = filepath.suffix.lower()
+    basename = entry_name.rsplit("/", 1)[-1] if "/" in entry_name else entry_name
     try:
         if suffix == ".zip":
             with zipfile.ZipFile(filepath, "r") as zf:
-                # Try exact match
                 try:
                     return zf.read(entry_name)
                 except KeyError:
                     pass
-                # Try matching by suffix (path may differ due to prefix)
-                basename = entry_name.rsplit("/", 1)[-1] if "/" in entry_name else entry_name
+                # Try by basename
                 for info in zf.infolist():
                     if info.filename.endswith("/" + basename) or info.filename == basename:
                         return zf.read(info)
+                # Try without first path component (some zips drop the top folder)
+                if "/" in entry_name:
+                    shorter = entry_name.split("/", 1)[1]
+                    try:
+                        return zf.read(shorter)
+                    except KeyError:
+                        pass
         elif suffix == ".unitypackage":
-            with tarfile.open(filepath, "r:gz") as tf:
-                # entry_name is the display name (GUID-resolved). Try matching by basename.
-                basename = entry_name.rsplit("/", 1)[-1] if "/" in entry_name else entry_name
-                for member in tf.getmembers():
-                    if member.isfile() and member.name.endswith("/" + basename):
-                        f = tf.extractfile(member)
-                        if f:
-                            return f.read()
+            try:
+                with tarfile.open(filepath, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.isfile() and member.name.endswith("/" + basename):
+                            f = tf.extractfile(member)
+                            if f:
+                                return f.read()
+            except tarfile.ReadError:
+                # Some .unitypackage files are actually zip format
+                with zipfile.ZipFile(filepath, "r") as zf:
+                    try:
+                        return zf.read(entry_name)
+                    except KeyError:
+                        pass
+                    for info in zf.infolist():
+                        if info.filename.endswith("/" + basename):
+                            return zf.read(info)
+        elif suffix == ".rar":
+            import rarfile
+            with rarfile.RarFile(filepath, "r") as rf:
+                try:
+                    return rf.read(entry_name)
+                except KeyError:
+                    pass
+                for info in rf.infolist():
+                    if info.filename.endswith("/" + basename) or info.filename == basename:
+                        return rf.read(info)
+        elif suffix == ".7z":
+            # 7z support via py7zr if available
+            try:
+                import py7zr
+                with py7zr.SevenZipFile(filepath, "r") as szf:
+                    szf.reset()
+                    for name, bio in szf.read([entry_name]).items():
+                        if bio is not None:
+                            return bio.read()
+                    # Try by basename
+                    all_entries = szf.getnames()
+                    for ename in all_entries:
+                        if ename.endswith("/" + basename) or ename == basename:
+                            for rname, bio in szf.read([ename]).items():
+                                if bio is not None:
+                                    return bio.read()
+            except ImportError:
+                pass
     except Exception:
-        pass
+        return None
     return None
 
 
@@ -145,11 +188,18 @@ class CoverTrainerDialog(QDialog):
         skip_btn.clicked.connect(self._on_skip)
         header.addWidget(skip_btn)
 
+        self._renew_btn = QPushButton("Renew")
+        self._renew_btn.setToolTip("Load fresh batch of 15 assets")
+        self._renew_btn.clicked.connect(self._load_assets)
+        self._renew_btn.setVisible(False)
+        header.addWidget(self._renew_btn)
+
         layout.addLayout(header)
 
         # Instruction
         self._instruction = QLabel(
-            "Click the image that best represents this asset as its cover/thumbnail."
+            "Click the image that best represents this asset as its cover/thumbnail.\n"
+            "Space = Save & Next   |   Esc = Close"
         )
         self._instruction.setWordWrap(True)
         layout.addWidget(self._instruction)
@@ -182,7 +232,7 @@ class CoverTrainerDialog(QDialog):
         layout.addLayout(footer)
 
     def _load_assets(self):
-        self._assets = self._queries.get_trainable_assets()
+        self._assets = self._queries.get_trainable_assets(limit=15)
         if not self._assets:
             self._title_label.setText("All done!")
             self._instruction.setText(
@@ -190,9 +240,11 @@ class CoverTrainerDialog(QDialog):
             )
             self._progress_bar.setVisible(False)
             self._save_btn.setEnabled(False)
+            self._renew_btn.setVisible(False)
             return
         self._current_idx = 0
         self._progress_bar.setRange(0, len(self._assets))
+        self._renew_btn.setVisible(True)
         self._show_current()
 
     def _show_current(self):
@@ -213,12 +265,11 @@ class CoverTrainerDialog(QDialog):
 
         entries = _get_image_entries(asset, self._queries)
         if not entries:
-            # No images — auto-skip
-            self._current_idx += 1
-            if self._current_idx < len(self._assets):
-                self._show_current()
-            else:
-                self._load_assets()
+            # No images — show message and let user skip
+            no_img = QLabel("(No extractable images found for this asset)")
+            no_img.setStyleSheet("color: #94a3b8; font-style: italic;")
+            no_img.setAlignment(Qt.AlignCenter)
+            self._grid_layout.addWidget(no_img)
             return
 
         for entry_name in entries:
@@ -259,6 +310,14 @@ class CoverTrainerDialog(QDialog):
             )
             self.training_complete.emit()
             self.accept()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key_Space:
+            self._on_save_next()
+        elif event.key() == Qt.Key_Escape:
+            self._on_done()
+        else:
+            super().keyPressEvent(event)
 
     def _on_done(self):
         if self._current_idx < len(self._assets):

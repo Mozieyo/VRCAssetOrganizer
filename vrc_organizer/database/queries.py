@@ -277,6 +277,19 @@ class Queries:
             ).fetchall()
             return [(r[0], r[1], r[2], r[3]) for r in rows]
 
+    def search_tags(self, query: str, limit: int = 15) -> list[tuple[int, str, str, int]]:
+        """Search tags by name substring, returning (id, name, color, asset_count)."""
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                """SELECT t.id, t.name, t.color, COUNT(at.asset_id) as cnt
+                   FROM tags t LEFT JOIN asset_tags at ON t.id = at.tag_id
+                   LEFT JOIN assets a ON at.asset_id = a.id AND a.trash_date IS NULL
+                   WHERE t.name LIKE ?
+                   GROUP BY t.id ORDER BY cnt DESC LIMIT ?""",
+                (f"%{query}%", limit)
+            ).fetchall()
+            return [(r[0], r[1], r[2], r[3]) for r in rows]
+
     def delete_tag(self, tag_id: int):
         with self._db.write_connection() as conn:
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
@@ -372,7 +385,7 @@ class Queries:
 
     # ── Cover Label Training ─────────────────────────────────
 
-    def get_trainable_assets(self) -> list[Asset]:
+    def get_trainable_assets(self, limit: int = 200) -> list[Asset]:
         """Return assets with image entries in scan_results but no cover_label yet."""
         with self._db.connection() as conn:
             rows = conn.execute(
@@ -382,7 +395,8 @@ class Queries:
                      AND a.trash_date IS NULL
                      AND a.id NOT IN (SELECT asset_id FROM cover_labels)
                    ORDER BY a.date_added DESC
-                   LIMIT 200"""
+                   LIMIT ?""",
+                (limit,)
             ).fetchall()
             return [asset_from_row(r) for r in rows]
 
@@ -423,3 +437,107 @@ class Queries:
                 (asset_id, tag_id, 1 if accepted else 0)
             )
             conn.commit()
+
+    def record_tag_cooccurrence(self, tag_ids: list[int]):
+        """For all pairs in tag_ids, increment co-occurrence count."""
+        if len(tag_ids) < 2:
+            return
+        with self._db.write_connection() as conn:
+            for i in range(len(tag_ids)):
+                for j in range(i + 1, len(tag_ids)):
+                    a, b = tag_ids[i], tag_ids[j]
+                    if a > b:
+                        a, b = b, a
+                    conn.execute(
+                        """INSERT INTO tag_cooccurrence (tag_a_id, tag_b_id, count)
+                           VALUES (?, ?, 1)
+                           ON CONFLICT(tag_a_id, tag_b_id) DO UPDATE
+                           SET count = count + 1""",
+                        (a, b)
+                    )
+            conn.commit()
+
+    def get_related_tags(self, tag_id: int, limit: int = 10) -> list[tuple[int, str, int]]:
+        """Tags that frequently co-occur with tag_id, sorted by count DESC."""
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                """SELECT t.id, t.name, tc.count FROM tag_cooccurrence tc
+                   JOIN tags t ON (t.id = tc.tag_a_id OR t.id = tc.tag_b_id)
+                   AND t.id != ?
+                   WHERE (tc.tag_a_id = ? OR tc.tag_b_id = ?)
+                   ORDER BY tc.count DESC LIMIT ?""",
+                (tag_id, tag_id, tag_id, limit)
+            ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rows]
+
+    def export_training_data(self) -> dict:
+        """Export cover_labels and tag_reviews keyed by asset filename for portability."""
+        import json
+        from datetime import datetime, timezone
+        with self._db.connection() as conn:
+            cover_rows = conn.execute(
+                """SELECT a.filename, cl.image_name
+                   FROM cover_labels cl JOIN assets a ON a.id = cl.asset_id
+                   WHERE a.trash_date IS NULL"""
+            ).fetchall()
+            review_rows = conn.execute(
+                """SELECT a.filename, t.name, tr.accepted
+                   FROM tag_reviews tr
+                   JOIN assets a ON a.id = tr.asset_id
+                   JOIN tags t ON t.id = tr.tag_id
+                   WHERE a.trash_date IS NULL"""
+            ).fetchall()
+        return {
+            "version": 1,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "cover_labels": [
+                {"asset_filename": r[0], "image_name": r[1]} for r in cover_rows
+            ],
+            "tag_reviews": [
+                {"asset_filename": r[0], "tag_name": r[1], "accepted": bool(r[2])}
+                for r in review_rows
+            ],
+        }
+
+    def import_training_data(self, data: dict) -> dict:
+        """Import cover_labels and tag_reviews, matching by asset filename.
+        Returns {'imported': N, 'skipped': N}."""
+        imported = 0
+        skipped = 0
+        with self._db.write_connection() as conn:
+            # Index assets by filename for matching
+            assets = conn.execute(
+                "SELECT id, filename FROM assets WHERE trash_date IS NULL"
+            ).fetchall()
+            filename_to_id = {r[1]: r[0] for r in assets}
+
+            for entry in data.get("cover_labels", []):
+                asset_id = filename_to_id.get(entry["asset_filename"])
+                if asset_id is None:
+                    skipped += 1
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO cover_labels (asset_id, image_name) VALUES (?, ?)",
+                    (asset_id, entry["image_name"])
+                )
+                imported += 1
+
+            for entry in data.get("tag_reviews", []):
+                asset_id = filename_to_id.get(entry["asset_filename"])
+                if asset_id is None:
+                    skipped += 1
+                    continue
+                tag_row = conn.execute(
+                    "SELECT id FROM tags WHERE name = ?", (entry["tag_name"],)
+                ).fetchone()
+                if tag_row is None:
+                    skipped += 1
+                    continue
+                conn.execute(
+                    "INSERT OR IGNORE INTO tag_reviews (asset_id, tag_id, accepted) VALUES (?, ?, ?)",
+                    (asset_id, tag_row[0], 1 if entry.get("accepted", True) else 0)
+                )
+                imported += 1
+
+            conn.commit()
+        return {"imported": imported, "skipped": skipped}

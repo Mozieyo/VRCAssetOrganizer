@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 CREATE_STATEMENTS = [
     """
@@ -89,6 +89,14 @@ CREATE_STATEMENTS = [
         PRIMARY KEY (asset_id, image_name)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS tag_cooccurrence (
+        tag_a_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        tag_b_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+        count    INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (tag_a_id, tag_b_id)
+    )
+    """,
 ]
 
 # Covering indexes for common queries
@@ -99,6 +107,8 @@ INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_asset_tags_asset ON asset_tags(asset_id)",
     "CREATE INDEX IF NOT EXISTS idx_asset_tags_tag ON asset_tags(tag_id)",
     "CREATE INDEX IF NOT EXISTS idx_scan_results_asset ON scan_results(asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tag_cooccur_a ON tag_cooccurrence(tag_a_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tag_cooccur_b ON tag_cooccurrence(tag_b_id)",
 ]
 
 
@@ -141,6 +151,17 @@ def init_schema(conn: sqlite3.Connection):
                     accepted   INTEGER NOT NULL DEFAULT 1,
                     reviewed_at REAL DEFAULT (strftime('%s', 'now')),
                     PRIMARY KEY (asset_id, tag_id)
+                )"""
+            )
+
+        # Migration: v5 → v6 — tag_cooccurrence table
+        if current < 6:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS tag_cooccurrence (
+                    tag_a_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    tag_b_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    count    INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (tag_a_id, tag_b_id)
                 )"""
             )
 
