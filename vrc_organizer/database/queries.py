@@ -290,6 +290,14 @@ class Queries:
             ).fetchall()
             return [(r[0], r[1], r[2], r[3]) for r in rows]
 
+    def get_tag_by_name(self, name: str) -> tuple[int, str, str] | None:
+        """Return (id, name, color) for a tag by exact name, or None."""
+        with self._db.connection() as conn:
+            row = conn.execute(
+                "SELECT id, name, color FROM tags WHERE name = ?", (name,)
+            ).fetchone()
+            return (row[0], row[1], row[2]) if row else None
+
     def delete_tag(self, tag_id: int):
         with self._db.write_connection() as conn:
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))

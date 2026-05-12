@@ -4,7 +4,7 @@ import os
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QThreadPool
+from PySide6.QtCore import Qt, QSize, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QDockWidget, QLabel,
     QStatusBar, QMenuBar, QMenu, QToolBar, QLineEdit, QSlider,
@@ -62,6 +62,31 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh()
         self._model.refresh()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Auto-open a trainer on first show if there's work to do
+        if not hasattr(self, '_auto_open_done'):
+            self._auto_open_done = True
+            QTimer.singleShot(800, self._maybe_auto_open_trainer)
+
+    def _maybe_auto_open_trainer(self):
+        cover_count = len(self._queries.get_trainable_assets(limit=1))
+        tag_count = len(self._queries.get_unreviewed_tagged_assets(limit=1))
+        if cover_count == 0 and tag_count == 0:
+            return
+        from PySide6.QtCore import QSettings
+        s = QSettings()
+        last = s.value("last_auto_trainer", "tag")
+        # Alternate which trainer opens
+        if last == "tag" and cover_count > 0:
+            s.setValue("last_auto_trainer", "cover")
+            self._on_train_covers()
+        elif tag_count > 0:
+            s.setValue("last_auto_trainer", "tag")
+            self._on_review_tags()
+        elif cover_count > 0:
+            self._on_train_covers()
+
     # ── Menu Bar ────────────────────────────────────────────
 
     def _seed_default_tags(self):
@@ -116,6 +141,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Review Auto-Tags...", self._on_review_tags)
         tools_menu.addAction("Train Cover Detection...", self._on_train_covers)
         tools_menu.addAction("Manage Tags...", self._on_manage_tags)
+        tools_menu.addSeparator()
+        tools_menu.addAction("Export Training Data...", self._on_export_training)
+        tools_menu.addAction("Import Training Data...", self._on_import_training)
 
         help_menu = mb.addMenu("&Help")
         help_menu.addAction("About")
@@ -450,6 +478,10 @@ class MainWindow(QMainWindow):
 
     def _do_add_tag(self, asset_id: int, tag_id: int):
         self._queries.add_tag_to_asset(asset_id, tag_id)
+        # Record co-occurrence with existing tags on this asset
+        existing = [t[0] for t in self._queries.get_tags_for_asset(asset_id)]
+        if len(existing) >= 2:
+            self._queries.record_tag_cooccurrence(existing)
         self._refresh_inspector_for(asset_id)
         self._sidebar.refresh()
         self._model.refresh()
@@ -951,6 +983,48 @@ class MainWindow(QMainWindow):
         self._thumb_worker.signals.status.connect(self._on_import_status)
         self._thumb_worker.signals.finished.connect(self._on_thumbs_finished)
         QThreadPool.globalInstance().start(self._thumb_worker)
+
+    def _on_export_training(self):
+        import json
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Training Data", "training_data.json",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        data = self._queries.export_training_data()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            QMessageBox.information(
+                self, "Export Complete",
+                f"Exported {len(data.get('cover_labels', []))} cover labels and "
+                f"{len(data.get('tag_reviews', []))} tag reviews."
+            )
+        except OSError as e:
+            QMessageBox.critical(self, "Export Failed", str(e))
+
+    def _on_import_training(self):
+        import json
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Training Data", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Import Failed", str(e))
+            return
+        result = self._queries.import_training_data(data)
+        QMessageBox.information(
+            self, "Import Complete",
+            f"Imported {result.get('imported', 0)} record(s).\n"
+            f"Skipped {result.get('skipped', 0)} record(s) (asset not found)."
+        )
+        self._model.refresh()
 
     def _on_toggle_theme(self):
         self._theme.toggle()

@@ -125,6 +125,11 @@ class ImportWorker(BaseWorker):
                 genre_id = self._queries.create_tag(genre_name, "#6366f1")
             if genre_id:
                 self._queries.add_tag_to_asset(asset_id, genre_id)
+                tag_ids.append(genre_id)
+
+            # Record co-occurrence for all tags assigned to this asset
+            if len(tag_ids) >= 2:
+                self._queries.record_tag_cooccurrence(tag_ids)
         except Exception:
             logger.warning("Auto-tagging failed for %s", filepath.name, exc_info=True)
 
