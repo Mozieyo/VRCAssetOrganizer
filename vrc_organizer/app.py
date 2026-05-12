@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from pathlib import Path
-from PySide6.QtCore import QSharedMemory
+from PySide6.QtCore import QSharedMemory, QSettings
 from PySide6.QtWidgets import QApplication
 import sys
 
@@ -13,7 +13,6 @@ def ensure_single_instance() -> QSharedMemory | None:
     mutex_name = "Global\\VrcAssetOrganizerSingleInstance"
     mutex = kernel32.CreateMutexW(None, False, mutex_name)
     if mutex == 0:
-        # Mutex creation failed entirely — fall back to shared memory
         shared = QSharedMemory("VrcAssetOrganizerSingleInstance")
         if shared.create(1):
             return shared
@@ -30,11 +29,8 @@ def ensure_single_instance() -> QSharedMemory | None:
         kernel32.CloseHandle(mutex)
         return None
 
-    # We own the mutex — store handle so it lives as long as the process
-    # Return a sentinel QSharedMemory for the is_single_instance interface
     shared = QSharedMemory("VrcAssetOrganizerSingleInstance")
-    shared.create(1)  # May fail silently if previous crash remnant; mutex already won
-    # Store the mutex handle on the shared object so it doesn't get GC'd
+    shared.create(1)
     shared.setObjectName(f"mutex:{mutex}")
     return shared
 
@@ -45,6 +41,28 @@ def get_app_data_dir() -> Path:
     return base
 
 
+def resolve_db_path() -> Path:
+    """Return the DB path, preferring the assets storage directory.
+
+    When the user sets an assets storage path and the DB lives alongside
+    the extracted assets, it survives app reinstall — just re-point to the
+    same folder and all metadata is intact.
+    """
+    s = QSettings("VrcAssetOrganizer", "VrcAssetOrganizer")
+    saved = s.value("db_path", "")
+    if saved:
+        p = Path(saved)
+        if p.exists():
+            return p
+    return get_app_data_dir() / "vrc_assets.db"
+
+
+def _save_db_path(path: Path):
+    """Persist the DB path to registry so future launches find it."""
+    s = QSettings("VrcAssetOrganizer", "VrcAssetOrganizer")
+    s.setValue("db_path", str(path))
+
+
 class VrcApp(QApplication):
     def __init__(self, argv: list[str]):
         super().__init__(argv)
@@ -53,7 +71,7 @@ class VrcApp(QApplication):
         self.setApplicationVersion("0.1.0")
 
         self.app_data_dir = get_app_data_dir()
-        self.db_path = self.app_data_dir / "vrc_assets.db"
+        self.db_path = resolve_db_path()
         self.thumb_cache_dir = self.app_data_dir / "thumbnails"
         self.thumb_cache_dir.mkdir(exist_ok=True)
 

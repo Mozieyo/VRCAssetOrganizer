@@ -2,6 +2,7 @@
 
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +83,22 @@ class Queries:
             )
             conn.commit()
 
+    def reset_thumbs_for_labeled(self) -> int:
+        """Reset thumb_state to 'pending' for assets with cover_labels.
+
+        After cover training, this lets ThumbWorker regenerate thumbnails
+        using the user-labeled cover image instead of the heuristic pick.
+        """
+        with self._db.write_connection() as conn:
+            cur = conn.execute(
+                "UPDATE assets SET thumb_state = 'pending' "
+                "WHERE id IN (SELECT asset_id FROM cover_labels) "
+                "AND thumb_state IN ('ready', 'error') "
+                "AND trash_date IS NULL"
+            )
+            conn.commit()
+            return cur.rowcount
+
     def update_notes(self, asset_id: int, notes: str):
         with self._db.write_connection() as conn:
             conn.execute(
@@ -119,8 +136,23 @@ class Queries:
 
     @staticmethod
     def _fts5_prefix_query(search_text: str) -> str:
-        """Convert 'go goth' to 'go* AND goth*' for FTS5 prefix matching."""
-        terms = re.findall(r'\w+', search_text)
+        """Convert user search to FTS5 prefix query.
+
+        Normalizes fullwidth→halfwidth (NFKC), splits camelCase and
+        digit-letter boundaries, and replaces common delimiters so that
+        concatenated input like "TwinTails" matches "Twin Tails" in filenames.
+        """
+        text = unicodedata.normalize('NFKC', search_text)
+        # Split camelCase: "TwinTails" → "Twin Tails"
+        text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+        text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
+        # Split digit-letter boundaries: "ver2Outfit" → "ver2 Outfit"
+        text = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", text)
+        text = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", text)
+        # Replace common delimiters with spaces
+        text = re.sub(r"[_\-\.\,\[\]\(\)\{\}\s\+]+", " ", text)
+
+        terms = re.findall(r'\w+', text)
         if not terms:
             return search_text
         escaped = []
@@ -354,6 +386,19 @@ class Queries:
             ).fetchall()
             return [asset_from_row(r) for r in rows]
 
+    def get_unreviewed_tagged_assets(self, limit: int = 50) -> list[Asset]:
+        """Return recently imported assets with tags that haven't been reviewed yet."""
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT a.* FROM assets a
+                   INNER JOIN asset_tags at ON a.id = at.asset_id
+                   WHERE a.trash_date IS NULL
+                     AND a.id NOT IN (SELECT DISTINCT asset_id FROM tag_reviews)
+                   GROUP BY a.id ORDER BY a.date_added DESC LIMIT ?""",
+                (limit,)
+            ).fetchall()
+            return [asset_from_row(r) for r in rows]
+
     def get_cover_label(self, asset_id: int) -> str | None:
         """Return the labeled cover image name for an asset, or None."""
         with self._db.connection() as conn:
@@ -367,5 +412,14 @@ class Queries:
             conn.execute(
                 "INSERT OR REPLACE INTO cover_labels (asset_id, image_name) VALUES (?, ?)",
                 (asset_id, image_name)
+            )
+            conn.commit()
+
+    def save_tag_review(self, asset_id: int, tag_id: int, accepted: bool):
+        with self._db.write_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO tag_reviews (asset_id, tag_id, accepted) "
+                "VALUES (?, ?, ?)",
+                (asset_id, tag_id, 1 if accepted else 0)
             )
             conn.commit()

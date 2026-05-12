@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 CREATE_STATEMENTS = [
     """
@@ -129,6 +129,18 @@ def init_schema(conn: sqlite3.Connection):
                     image_name TEXT NOT NULL,
                     chosen_at  REAL DEFAULT (strftime('%s', 'now')),
                     PRIMARY KEY (asset_id, image_name)
+                )"""
+            )
+
+        # Migration: v4 → v5 — tag_reviews table
+        if current < 5:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS tag_reviews (
+                    asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                    tag_id     INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    accepted   INTEGER NOT NULL DEFAULT 1,
+                    reviewed_at REAL DEFAULT (strftime('%s', 'now')),
+                    PRIMARY KEY (asset_id, tag_id)
                 )"""
             )
 

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QGroupBox, QRadioButton,
 )
 
-from vrc_organizer.app import VrcApp
+from vrc_organizer.app import VrcApp, _save_db_path
 from vrc_organizer.database.queries import Queries
 from vrc_organizer.ui.theme import ThemeManager
 from vrc_organizer.ui.thumbnail_grid import (
@@ -26,6 +26,7 @@ from vrc_organizer.ui.drop_overlay import DropOverlay
 from vrc_organizer.ui.sidebar import Sidebar
 from vrc_organizer.ui.settings_dialog import SettingsDialog
 from vrc_organizer.ui.cover_trainer import CoverTrainerDialog
+from vrc_organizer.ui.tag_reviewer import TagReviewerDialog
 from vrc_organizer.tools.registry import ToolRegistry
 from vrc_organizer.tools.launcher import ToolLauncher
 from vrc_organizer.unity_windows import find_unity_editors, find_unity_project_path
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
 
         tools_menu = mb.addMenu("&Tools")
         tools_menu.addAction("Batch Generate Thumbnails...", self._on_batch_thumbnails)
+        tools_menu.addAction("Review Auto-Tags...", self._on_review_tags)
         tools_menu.addAction("Train Cover Detection...", self._on_train_covers)
         tools_menu.addAction("Manage Tags...", self._on_manage_tags)
 
@@ -718,6 +720,7 @@ class MainWindow(QMainWindow):
                 if reply == QMessageBox.Yes:
                     self._migrate_assets(stray, default_dir, new_dir)
             self._queries.set_setting("library_dir", str(new_dir))
+            self._relocate_db(new_dir)
             self._status_label.setText(f"Storage path set: {folder}")
             return
 
@@ -728,6 +731,7 @@ class MainWindow(QMainWindow):
         affected = self._queries.get_assets_in_dir(old_dir)
         if not affected:
             self._queries.set_setting("library_dir", str(new_dir))
+            self._relocate_db(new_dir)
             self._status_label.setText(f"Storage path set: {folder}")
             return
 
@@ -747,6 +751,7 @@ class MainWindow(QMainWindow):
 
         # Save new path
         self._queries.set_setting("library_dir", str(new_dir))
+        self._relocate_db(new_dir)
 
     def _migrate_assets(self, affected: list, src_dir: Path, dest_dir: Path):
         """Move assets from src_dir to dest_dir, updating DB references."""
@@ -809,6 +814,20 @@ class MainWindow(QMainWindow):
                 self, "Migration Errors",
                 "Some files could not be moved:\n\n" + "\n".join(errors[:10])
             )
+
+    def _relocate_db(self, storage_dir: Path):
+        """Copy the database to the assets storage directory.
+
+        On next launch, resolve_db_path() finds it there and the metadata
+        survives app reinstall — just re-point to the same storage folder.
+        """
+        dest = storage_dir / "vrc_assets.db"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(self._app.db_path), str(dest))
+            _save_db_path(dest)
+        except OSError as e:
+            self._status_label.setText(f"Could not relocate database: {e}")
 
     def _ask_migration_conflict(self, conflicts: dict[int, Path],
                                  affected: list) -> str | None:
@@ -911,10 +930,27 @@ class MainWindow(QMainWindow):
         self._thumb_worker.signals.finished.connect(self._on_thumbs_finished)
         QThreadPool.globalInstance().start(self._thumb_worker)
 
+    def _on_review_tags(self):
+        dlg = TagReviewerDialog(self._queries, self._app.thumb_cache_dir, self)
+        dlg.review_complete.connect(lambda: self._sidebar.refresh())
+        dlg.review_complete.connect(lambda: self._model.refresh())
+        dlg.exec()
+
     def _on_train_covers(self):
         dlg = CoverTrainerDialog(self._queries, self)
-        dlg.training_complete.connect(lambda: self._model.refresh())
+        dlg.training_complete.connect(self._regenerate_labeled_thumbs)
         dlg.exec()
+
+    def _regenerate_labeled_thumbs(self):
+        count = self._queries.reset_thumbs_for_labeled()
+        if count == 0:
+            self._model.refresh()
+            return
+        self._status_label.setText(f"Regenerating thumbnails with labeled covers ({count} asset(s))...")
+        self._thumb_worker = ThumbWorker(self._queries, self._app.thumb_cache_dir, limit=0)
+        self._thumb_worker.signals.status.connect(self._on_import_status)
+        self._thumb_worker.signals.finished.connect(self._on_thumbs_finished)
+        QThreadPool.globalInstance().start(self._thumb_worker)
 
     def _on_toggle_theme(self):
         self._theme.toggle()
