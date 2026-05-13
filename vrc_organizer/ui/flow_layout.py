@@ -53,11 +53,13 @@ class FlowLayout(QLayout):
                 self._items.append(_ItemWrapper(w))
         elif isinstance(item, _ItemWrapper):
             self._items.append(item)
+        self.invalidate()
 
     def addWidget(self, w: QWidget):
         self._items.append(_ItemWrapper(w))
         if self.parentWidget():
             w.setParent(self.parentWidget())
+        self.invalidate()
 
     def count(self) -> int:
         return len(self._items)
@@ -72,6 +74,7 @@ class FlowLayout(QLayout):
     def takeAt(self, index: int):
         if 0 <= index < len(self._items):
             wrapper = self._items.pop(index)
+            self.invalidate()
             return wrapper._qt_item
         return None
 
@@ -95,7 +98,18 @@ class FlowLayout(QLayout):
             self._in_layout = False
 
     def sizeHint(self) -> QSize:
-        return self.minimumSize()
+        # Calculate total layout height for the available width.
+        # minimumSize() returns only the max single-item size, which
+        # causes QScrollArea containers to collapse to one row.
+        w = 200
+        parent = self.parentWidget()
+        if parent:
+            margins = parent.contentsMargins()
+            avail = parent.width() - margins.left() - margins.right()
+            if avail > 0:
+                w = avail
+        h = self.heightForWidth(w)
+        return QSize(w, max(h, self.minimumSize().height()))
 
     def minimumSize(self) -> QSize:
         size = QSize()

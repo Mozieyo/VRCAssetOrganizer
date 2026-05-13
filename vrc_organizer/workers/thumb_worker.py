@@ -43,7 +43,7 @@ class ThumbWorker(BaseWorker):
 
             if data:
                 try:
-                    thumb_path = self._thumb_cache_dir / f"{asset.id}.webp"
+                    thumb_path = self._thumb_cache_dir / f"{asset.id}.png"
                     thumb_path.parent.mkdir(parents=True, exist_ok=True)
                     thumb_path.write_bytes(data)
                     self._queries.update_thumbnail(asset.id, thumb_path, "ready")
@@ -150,7 +150,7 @@ class ThumbWorker(BaseWorker):
             size = info.file_size
 
             # Direct images
-            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                 if size < MAX_THUMB_SOURCE:
                     score = _thumb_score(name, size)
                     if score > best_score:
@@ -215,7 +215,7 @@ class ThumbWorker(BaseWorker):
                     continue
                 name = member.name
                 size = member.size
-                if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
+                if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                     continue
                 if size > MAX_THUMB_SOURCE:
                     continue
@@ -253,7 +253,7 @@ class ThumbWorker(BaseWorker):
                         continue
                     name = info.filename
                     size = info.file_size
-                    if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
+                    if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
                         continue
                     if size > MAX_THUMB_SOURCE:
                         continue

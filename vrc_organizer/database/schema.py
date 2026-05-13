@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 CREATE_STATEMENTS = [
     """
@@ -164,6 +164,74 @@ def init_schema(conn: sqlite3.Connection):
                     PRIMARY KEY (tag_a_id, tag_b_id)
                 )"""
             )
+
+        # Migration: v6 → v7 — labeling tables for ML training
+        if current < 7:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS cover_labels_v2 (
+                    asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+                    image_name TEXT NOT NULL,
+                    image_width INTEGER,
+                    image_height INTEGER,
+                    archive_depth INTEGER,
+                    filename_score INTEGER,
+                    images_shown INTEGER,
+                    chosen_at REAL DEFAULT (strftime('%s', 'now'))
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS tag_labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL,
+                    original_tags TEXT,
+                    accepted_tags TEXT,
+                    rejected_tags TEXT,
+                    added_tags TEXT,
+                    genre_tag_id INTEGER REFERENCES tags(id),
+                    labeled_at REAL DEFAULT (strftime('%s', 'now')),
+                    UNIQUE(asset_id, session_id)
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_asset ON tag_labels(asset_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_session ON tag_labels(session_id)")
+            conn.execute(
+                """INSERT OR IGNORE INTO cover_labels_v2 (asset_id, image_name)
+                   SELECT asset_id, image_name FROM cover_labels"""
+            )
+
+        # Migration: v7 → v8 — remove timing columns (not useful for ML)
+        if current == 7:
+            conn.execute("DROP TABLE IF EXISTS cover_labels_v2")
+            conn.execute("DROP TABLE IF EXISTS tag_labels")
+            conn.execute(
+                """CREATE TABLE cover_labels_v2 (
+                    asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+                    image_name TEXT NOT NULL,
+                    image_width INTEGER,
+                    image_height INTEGER,
+                    archive_depth INTEGER,
+                    filename_score INTEGER,
+                    images_shown INTEGER,
+                    chosen_at REAL DEFAULT (strftime('%s', 'now'))
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE tag_labels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+                    session_id TEXT NOT NULL,
+                    original_tags TEXT,
+                    accepted_tags TEXT,
+                    rejected_tags TEXT,
+                    added_tags TEXT,
+                    genre_tag_id INTEGER REFERENCES tags(id),
+                    labeled_at REAL DEFAULT (strftime('%s', 'now')),
+                    UNIQUE(asset_id, session_id)
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_asset ON tag_labels(asset_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_session ON tag_labels(session_id)")
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",

@@ -1,0 +1,291 @@
+{
+  "version": 1,
+  "exported_at": "2026-05-12T16:47:12.860892+00:00",
+  "cover_labels": [
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "image_name": "kipfel_eye.png"
+    },
+    {
+      "asset_filename": "material-combiner-addon-master.zip",
+      "image_name": "material-combiner-addon-master/icons/texture.png"
+    },
+    {
+      "asset_filename": "Selestia_Kemono.unitypackage",
+      "image_name": "Assets/Magenta_3DModel/Sele_Ear&Tail/Sele_Kemo_Mat_White.mat/preview.png"
+    },
+    {
+      "asset_filename": "Selestia_Kemono.zip",
+      "image_name": "Selestia_Kemono.unitypackage/Assets/Magenta_3DModel/Sele_Ear&Tail/Sele_kemo_texture.png/preview.png"
+    },
+    {
+      "asset_filename": "宇宙猫セット.zip",
+      "image_name": "宇宙猫セット/宇宙猫セット.unitypackage/Assets/うちゅうねこ/画像、Ani,FBX/宇宙.mat/preview.png"
+    },
+    {
+      "asset_filename": "白黒の翼.zip",
+      "image_name": "白黒の翼/TEX.psd"
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "image_name": "SnakeTail/- Texture/snake base color green.png"
+    }
+  ],
+  "tag_reviews": [
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Body",
+      "accepted": false
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Eyebrows",
+      "accepted": false
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Eyelashes",
+      "accepted": false
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Eyes",
+      "accepted": true
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Glowing",
+      "accepted": true
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "_2アバター対応_Aqua_Glow_Eye_Texture.zip",
+      "tag_name": "Texture",
+      "accepted": true
+    },
+    {
+      "asset_filename": "material-combiner-addon-master.zip",
+      "tag_name": "Material",
+      "accepted": true
+    },
+    {
+      "asset_filename": "material-combiner-addon-master.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "material-combiner-addon-master.zip",
+      "tag_name": "Texture",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.unitypackage",
+      "tag_name": "Kemono",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.unitypackage",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.unitypackage",
+      "tag_name": "Selestia",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.zip",
+      "tag_name": "Avatar Base",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.zip",
+      "tag_name": "Kemono",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Selestia_Kemono.zip",
+      "tag_name": "Selestia",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Yuzuha Swimsuit MMD.zip",
+      "tag_name": "Outfit",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Yuzuha Swimsuit MMD.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Yuzuha Swimsuit MMD.zip",
+      "tag_name": "Suit",
+      "accepted": true
+    },
+    {
+      "asset_filename": "Yuzuha Swimsuit MMD.zip",
+      "tag_name": "Swimsuit",
+      "accepted": true
+    },
+    {
+      "asset_filename": "宇宙猫セット.zip",
+      "tag_name": "Neko",
+      "accepted": true
+    },
+    {
+      "asset_filename": "宇宙猫セット.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "白黒の翼.zip",
+      "tag_name": "Accessory",
+      "accepted": true
+    },
+    {
+      "asset_filename": "白黒の翼.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "白黒の翼.zip",
+      "tag_name": "Wings",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Accessory",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Hair",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Ponytail",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Tail",
+      "accepted": true
+    },
+    {
+      "asset_filename": "SnakeTail.zip",
+      "tag_name": "Twin Tails",
+      "accepted": true
+    },
+    {
+      "asset_filename": "キョンシー帽子.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "rurune.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "rurune.zip",
+      "tag_name": "rurune",
+      "accepted": true
+    },
+    {
+      "asset_filename": "komano.zip",
+      "tag_name": "Komano",
+      "accepted": true
+    },
+    {
+      "asset_filename": "komano.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Accessory",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Chocolat",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Ears",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Hair",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Hair Accessory",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Hairstyle",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Long Hair",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    },
+    {
+      "asset_filename": "hair_Chocolat.zip",
+      "tag_name": "Short Hair",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Accessory",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Body",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Face",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Head",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Mask",
+      "accepted": true
+    },
+    {
+      "asset_filename": "FaceMask_mql_Full_Free.zip",
+      "tag_name": "Outfit & Acce",
+      "accepted": true
+    }
+  ]
+}

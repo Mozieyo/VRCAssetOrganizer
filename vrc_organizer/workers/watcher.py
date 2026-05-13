@@ -1,9 +1,14 @@
+"""Library directory watcher for auto-import.
+
+NOTE: This module is not yet wired up to MainWindow. It provides the
+infrastructure for watching the library directory and detecting new
+files for auto-import, but the feature is not complete.
+"""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, QTimer, QFileSystemWatcher
-from PySide6.QtWidgets import QApplication
 
 
 class LibraryWatcher(QObject):

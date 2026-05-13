@@ -78,6 +78,7 @@ class AssetListModel(QAbstractListModel):
         self.beginResetModel()
         self._ids.clear()
         self._pixmap_cache.clear()
+        self._asset_cache = {}
         self._total = self._queries.count_assets(
             filetypes=self._filetypes, or_tag_ids=self._or_tag_ids,
             and_tag_ids=self._and_tag_ids, search_query=self._search,
@@ -99,8 +100,16 @@ class AssetListModel(QAbstractListModel):
         return self._ids[index] if 0 <= index < len(self._ids) else 0
 
     # ── internal helpers ──
+    def _get_asset_cached(self, aid: int):
+        """Return cached Asset or fetch from DB. Avoids N+1 queries."""
+        if not hasattr(self, '_asset_cache'):
+            self._asset_cache = {}
+        if aid not in self._asset_cache:
+            self._asset_cache[aid] = self._queries.get_asset(aid)
+        return self._asset_cache[aid]
+
     def _get_filename(self, aid: int) -> str:
-        a = self._queries.get_asset(aid)
+        a = self._get_asset_cached(aid)
         return a.filename if a else "..."
 
     def set_thumb_size(self, size: int):
@@ -112,26 +121,20 @@ class AssetListModel(QAbstractListModel):
             ts = self._thumb_size
             if cached.width() == ts or cached.height() == ts:
                 return cached
-            # Wrong size — evict and reload below
             del self._pixmap_cache[aid]
-        try:
-            a = self._queries.get_asset(aid)
-            if a is None or a.thumbnail is None:
-                return None
-            pix = QPixmap()
-            if pix.load(str(a.thumbnail)):
-                ts = self._thumb_size
-                scaled = pix.scaled(ts, ts, Qt.KeepAspectRatio,
-                                    Qt.SmoothTransformation)
-                # Evict oldest if at capacity (Python 3.7+ dicts preserve insertion order)
-                while len(self._pixmap_cache) >= MAX_CACHED_THUMBS:
-                    oldest = next(iter(self._pixmap_cache))
-                    del self._pixmap_cache[oldest]
-                self._pixmap_cache[aid] = scaled
-                return scaled
-        except Exception:
-            pass
-        return None
+        a = self._get_asset_cached(aid)
+        if a is None or a.thumbnail is None:
+            return None
+        pix = QPixmap()
+        if not pix.load(str(a.thumbnail)):
+            return None
+        ts = self._thumb_size
+        scaled = pix.scaled(ts, ts, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        while len(self._pixmap_cache) >= MAX_CACHED_THUMBS:
+            oldest = next(iter(self._pixmap_cache))
+            del self._pixmap_cache[oldest]
+        self._pixmap_cache[aid] = scaled
+        return scaled
 
     def _get_tooltip(self, aid: int) -> str:
         a = self._queries.get_asset(aid)

@@ -12,21 +12,11 @@ def ensure_single_instance() -> QSharedMemory | None:
     kernel32 = ctypes.windll.kernel32
     mutex_name = "Global\\VrcAssetOrganizerSingleInstance"
     mutex = kernel32.CreateMutexW(None, False, mutex_name)
-    if mutex == 0:
-        shared = QSharedMemory("VrcAssetOrganizerSingleInstance")
-        if shared.create(1):
-            return shared
-        if shared.attach():
-            shared.detach()
-            if shared.create(1):
-                return shared
-            if shared.attach():
-                return shared
-        return None
 
     ERROR_ALREADY_EXISTS = 183
-    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        kernel32.CloseHandle(mutex)
+    if mutex == 0 or kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        if mutex:
+            kernel32.CloseHandle(mutex)
         return None
 
     shared = QSharedMemory("VrcAssetOrganizerSingleInstance")

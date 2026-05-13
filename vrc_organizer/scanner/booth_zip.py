@@ -116,15 +116,28 @@ def _scan_unitypackage_data(data: bytes, max_depth: int, prefix: str
             mname = member.name
             msize = member.size
 
+            # Thumbnail: check raw name before filtering non-asset entries
+            if _is_image(mname) and msize < MAX_THUMB_SOURCE:
+                score = _up_thumb_score(mname, msize)
+                if score > best_thumb_score:
+                    best_thumb_score = score
+                    try:
+                        f = tf.extractfile(member)
+                        if f:
+                            best_thumb_data = _make_thumb(f.read())
+                    except Exception:
+                        pass
+
             display_name = _resolve_display_name(mname, guid_names)
             if display_name is None:
                 continue
             full_name = f"{prefix}/{display_name}"
 
-            entry_type, _ = classify(Path(mname))
+            # Classify based on resolved display name, not raw tar member name
+            entry_type, _ = classify(Path(display_name))
             contents.append((full_name, entry_type, msize))
 
-            if _is_image(mname) and msize < MAX_THUMB_SOURCE:
+            if _is_image(display_name) and msize < MAX_THUMB_SOURCE:
                 score = _up_thumb_score(display_name, msize)
                 if score > best_thumb_score:
                     best_thumb_score = score
@@ -202,6 +215,6 @@ def _thumb_score(name: str, size: int) -> int:
 
 
 def _is_image(name: str) -> bool:
-    return name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd"))
+    return name.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
 
 

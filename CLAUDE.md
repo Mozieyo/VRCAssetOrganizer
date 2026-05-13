@@ -10,9 +10,9 @@ This is a **single-user desktop tool** — not a server, not a service, not mult
 - **Import:** Drag .zip / .unitypackage / .blend / .fbx / .png files onto the window. The app scans them, classifies contents, extracts a preview thumbnail, auto-tags from filename/folder analysis, auto-classifies genre, and stores metadata in a local SQLite database. Archives (.zip, .rar) are extracted to a user-configurable library directory so individual files inside can be opened.
 - **Browse:** A responsive thumbnail grid with lazy loading. Cards show the preview image and filename. Selection is multi-select. Cards are centered in the viewport.
 - **Filter:** Left sidebar has genre toggle buttons (Avatar Base, Outfit & Acce, Gimmick, Tools), an avatar picker (searchable, popularity-ordered), a body-map widget (visual body-part selector), and a tag tree (user-created, color-coded). **Body map + genre + avatar use OR (union) logic.** **Tag tree uses AND (intersection) logic.** A search bar at the top supports partial-word matching (FTS5 prefix). A "Search All" checkbox bypasses active filters.
-- **Inspect:** Right dock shows the selected asset's thumbnail, filename, file metadata (type, size, path elided from front, dates), genre combobox (auto-deduced, overridable), avatar tag chips, additional tag chips, a contents tree with specific types (e.g. "image (psd)") and human-readable sizes, notes, and "Open With" buttons for configured tools.
+- **Inspect:** Right dock shows the selected asset's thumbnail, filename, file metadata (type, size, path elided from front, dates), genre chip buttons (auto-deduced, overridable), avatar tag chips, additional tag chips, a contents tree with specific types (e.g. "image (psd)") and human-readable sizes, notes, and "Open With" buttons for configured tools.
 - **Act:** Right-click an asset for context menu — Reveal in File Explorer, Open With, Add Tag, Re-scan, Delete (with confirmation). Double-click a content entry to open the extracted file.
-- **Configure:** Preferences menu for Dark Mode toggle, Unity Editor path, Assets Storage Path. Full Settings dialog for tool configuration.
+- **Configure:** Preferences menu for Dark Mode toggle, Unity Editor path, Assets Storage Path. Full Settings dialog for tool configuration. Tools > Purge Cache & Packages clears thumbnail cache and extracted library packages, resetting thumbs to regenerate on next browse.
 
 ## Design Principles
 1. **Fast over fancy.** The import pipeline, search, and filtering must feel instant for libraries up to ~500 assets. Defer expensive work. Lazy-load the grid. Cache what you can.
@@ -43,7 +43,7 @@ main.py → VrcApp (QApplication)
 - **Filter flow:** Sidebar.tag_filter_changed(or_ids, and_ids) → MainWindow._on_tag_filter → _apply_filters → model.set_filter(or_tag_ids, and_tag_ids). OR group uses `WHERE tag_id IN (...)` subquery (union). AND group uses individual `WHERE tag_id = ?` subqueries (intersection).
 - **Search:** FTS5 prefix matching — each word token gets `*` appended. Reserved FTS5 words (AND, OR, NOT, NEAR) get double-quoted.
 - **Tag system:** Tags are flat in the DB (no parent/child). Categories enforced at UI level: genre (exactly one of 4), avatar (popularity-ordered list), additional (everything else). TAG_HIERARCHY in tag_data.py implies parent tags during auto-tagging only.
-- **Genre system:** 4 genres — Avatar Base, Outfit & Acce, Gimmick, Tools. Auto-detected on import via suggest_genre() using keyword matching + tag analysis + filetype heuristics. User can override via combobox in inspector.
+- **Genre system:** 4 genres — Avatar Base, Outfit & Acce, Gimmick, Tools. Auto-detected on import via suggest_genre() using keyword matching + tag analysis + filetype heuristics. User can override via chip buttons in inspector.
 
 ## Key Conventions
 - Python 3.11+ with `from __future__ import annotations`
@@ -55,19 +55,22 @@ main.py → VrcApp (QApplication)
 - All DB writes go through `self._db.write_connection()` (acquires mutex); reads use `self._db.connection()` (thread-local)
 - Worker threads: extend `BaseWorker`, override `_run()`, emit `signals.finished` / `signals.error` / `signals.progress`
 - UI components get a `Queries` reference — no service layer
+- **Imports at file top** — no inline `import` statements inside functions; move all imports to the top of the file
+- **Caching for N+1 avoidance** — when iterating visible items, cache DB lookups to avoid repeated queries (see `_get_asset_cached()` in thumbnail_grid.py)
+- **State sync on refresh** — when rebuilding UI state (e.g., sidebar filter chips), preserve internal state sets across the rebuild and restore chip checked state after recreation
 
 ## Files of Note
 | File | Role |
 |------|------|
 | `main_window.py` | Central hub — wires signals, hosts toolbar/menus/splitter/dock |
 | `thumbnail_grid.py` | Model + delegate + view — OR/AND tag filter, lazy loading, center justification |
-| `inspector.py` | Detail panel — thumbnail, genre combo, avatar chips, tag chips, contents tree, notes, tools |
+| `inspector.py` | Detail panel — thumbnail, genre chips, avatar chips (searchable), tag chips (inline + creation), contents tree, notes, tools |
 | `sidebar.py` | Left panel — genre buttons, avatar picker, body map, AND tag tree, clear/manage buttons |
 | `body_map.py` | Custom-painted avatar silhouette — hit-testing via QPainterPath, 2:3 aspect ratio |
 | `queries.py` | All SQL — asset CRUD, tag CRUD, OR/AND filtering, search, settings, migration |
 | `importer.py` | Async import worker — archive extraction, scan dispatch, thumbnail save, auto-tagging, genre classification |
 | `auto_tagger.py` | Tokenizer + WORD_TO_TAG matching + avatar detection + Japanese name resolution + genre classification |
-| `tag_data.py` | Dictionaries — TOP_AVATARS (popularity-ordered), WORD_TO_TAG (455 entries), JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY |
+| `tag_data.py` | Dictionaries — TOP_AVATARS (popularity-ordered), WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY |
 | `launcher.py` | subprocess.Popen for Blender/Unity/Photoshop with Unity multi-instance support |
 | `registry.py` | ToolConfig dataclass + QSettings persistence + DEFAULT_TOOL_MAP |
 | `theme.py` | QPalette builder + DWM dark title bar |
@@ -79,8 +82,10 @@ main.py → VrcApp (QApplication)
 | `unity_windows.py` | Win32 API via ctypes — detects running Unity Editor windows by window class name |
 | `chip_button.py` | ChipToggleButton — exclusive_group for radio-button behavior, used by sidebar + inspector |
 | `flow_layout.py` | FlowLayout — CSS-flexbox-like layout for chip containers, handles widget reparenting |
-| `cover_trainer.py` | Training jig dialog — shows all images in an asset, user clicks the best cover for ML training |
+| `cover_labeler.py` | Captcha-style dialog for cover selection — shows up to 6 images, keyboard shortcuts 1-6, captures image metadata (dimensions, depth, filename score) for ML training; accepts thumb_cache_dir for cached thumbnail fallback when archive extraction yields no images |
+| `tag_labeler.py` | Captcha-style dialog for tag review — genre radio buttons, toggleable tag chips, suggestions from co-occurrence, search popup, session-based labeling with timing for ML training |
 | `rarfile_scanner.py` | RAR archive scanner — uses rarfile library, requires unrar utility on system PATH |
+| `watcher.py` | LibraryWatcher — QFileSystemWatcher for auto-import (NOT YET WIRED UP — planned feature) |
 
 ## What NOT to Do
 - Don't add `logging` module without discussing — we use `logger = logging.getLogger(__name__)` only in `importer.py` currently
@@ -92,6 +97,9 @@ main.py → VrcApp (QApplication)
 - Don't add confirmation dialogs for tag add/remove — only destructive operations (delete) need confirmation
 - Don't add startup wizards or onboarding tours — the empty-state placeholder text is sufficient for v0.1
 - Don't use `os.system()` for shell commands — use `subprocess.run()` with list arguments
+- Don't use inline imports inside functions — move all imports to file top for clarity and consistency
+- Don't call `get_asset()` in a loop without caching — use a dict cache to avoid N+1 queries
+- Don't rebuild UI chip widgets without clearing the corresponding state sets (e.g., `_genre_ids`, `_avatar_ids`)
 
 ## Running
 ```bash

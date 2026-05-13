@@ -1,10 +1,15 @@
 ﻿from __future__ import annotations
 
+import json
 import os
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QThreadPool, QTimer
+import send2trash
+from PySide6.QtCore import Qt, QSize, QThreadPool, QTimer, QSettings
+from PySide6.QtGui import QPixmapCache
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QDockWidget, QLabel,
     QStatusBar, QMenuBar, QMenu, QToolBar, QLineEdit, QSlider,
@@ -25,8 +30,8 @@ from vrc_organizer.ui.context_menu import AssetContextMenu
 from vrc_organizer.ui.drop_overlay import DropOverlay
 from vrc_organizer.ui.sidebar import Sidebar
 from vrc_organizer.ui.settings_dialog import SettingsDialog
-from vrc_organizer.ui.cover_trainer import CoverTrainerDialog
-from vrc_organizer.ui.tag_reviewer import TagReviewerDialog
+from vrc_organizer.ui.cover_labeler import CoverLabelerDialog
+from vrc_organizer.ui.tag_labeler import TagLabelerDialog
 from vrc_organizer.tools.registry import ToolRegistry
 from vrc_organizer.tools.launcher import ToolLauncher
 from vrc_organizer.unity_windows import find_unity_editors, find_unity_project_path
@@ -64,28 +69,27 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Auto-open a trainer on first show if there's work to do
+        # Auto-open a labeler on first show if there's work to do
         if not hasattr(self, '_auto_open_done'):
             self._auto_open_done = True
-            QTimer.singleShot(800, self._maybe_auto_open_trainer)
+            QTimer.singleShot(800, self._maybe_auto_open_labeler)
 
-    def _maybe_auto_open_trainer(self):
-        cover_count = len(self._queries.get_trainable_assets(limit=1))
-        tag_count = len(self._queries.get_unreviewed_tagged_assets(limit=1))
+    def _maybe_auto_open_labeler(self):
+        cover_count = len(self._queries.get_unlabeled_cover_assets(limit=1))
+        tag_count = len(self._queries.get_unlabeled_tag_assets(limit=1))
         if cover_count == 0 and tag_count == 0:
             return
-        from PySide6.QtCore import QSettings
         s = QSettings()
-        last = s.value("last_auto_trainer", "tag")
-        # Alternate which trainer opens
+        last = s.value("last_auto_labeler", "tag")
+        # Alternate which labeler opens
         if last == "tag" and cover_count > 0:
-            s.setValue("last_auto_trainer", "cover")
-            self._on_train_covers()
+            s.setValue("last_auto_labeler", "cover")
+            self._on_label_covers()
         elif tag_count > 0:
-            s.setValue("last_auto_trainer", "tag")
-            self._on_review_tags()
+            s.setValue("last_auto_labeler", "tag")
+            self._on_label_tags()
         elif cover_count > 0:
-            self._on_train_covers()
+            self._on_label_covers()
 
     # ── Menu Bar ────────────────────────────────────────────
 
@@ -138,12 +142,16 @@ class MainWindow(QMainWindow):
 
         tools_menu = mb.addMenu("&Tools")
         tools_menu.addAction("Batch Generate Thumbnails...", self._on_batch_thumbnails)
-        tools_menu.addAction("Review Auto-Tags...", self._on_review_tags)
-        tools_menu.addAction("Train Cover Detection...", self._on_train_covers)
+        tools_menu.addAction("Rescan All Assets...", self._on_rescan_all)
+        tools_menu.addSeparator()
+        tools_menu.addAction("Label Tags...", self._on_label_tags)
+        tools_menu.addAction("Label Covers...", self._on_label_covers)
         tools_menu.addAction("Manage Tags...", self._on_manage_tags)
         tools_menu.addSeparator()
         tools_menu.addAction("Export Training Data...", self._on_export_training)
         tools_menu.addAction("Import Training Data...", self._on_import_training)
+        tools_menu.addSeparator()
+        tools_menu.addAction("Purge Cache && Packages...", self._on_purge_cache)
 
         help_menu = mb.addMenu("&Help")
         help_menu.addAction("About")
@@ -227,6 +235,8 @@ class MainWindow(QMainWindow):
         self._inspector = InspectorPanel(self._queries, self._tool_registry)
         self._inspector.tag_added.connect(self._on_tag_add_request)
         self._inspector.tag_removed.connect(self._on_tag_removed)
+        self._inspector.tag_renamed.connect(self._on_tag_renamed)
+        self._inspector.tag_deleted.connect(self._on_tag_deleted)
         self._inspector.notes_changed.connect(self._on_notes_save)
         self._inspector.open_with.connect(self._on_open_with)
 
@@ -353,7 +363,6 @@ class MainWindow(QMainWindow):
     def _check_multi_unitypackage(self, asset_ids: list[int]):
         """If any imported asset is a zip with multiple .unitypackage files,
         offer to extract them as separate assets."""
-        import zipfile
 
         for aid in asset_ids:
             asset = self._queries.get_asset(aid)
@@ -410,8 +419,6 @@ class MainWindow(QMainWindow):
                 with zipfile.ZipFile(asset.filepath, "r") as zf:
                     for name in selected:
                         data = zf.read(name)
-                        # Write to temp dir and import
-                        import tempfile
                         tmp = Path(tempfile.gettempdir()) / "VrcAssetOrganizer" / "extracted"
                         tmp.mkdir(parents=True, exist_ok=True)
                         out = tmp / name.split("/")[-1]
@@ -475,6 +482,18 @@ class MainWindow(QMainWindow):
         self._refresh_inspector_for(asset_id)
         self._sidebar.refresh()
         self._model.refresh()
+
+    def _on_tag_renamed(self, tag_id: int, new_name: str):
+        self._queries.rename_tag(tag_id, new_name)
+        self._sidebar.refresh()
+        self._model.refresh()
+        self._refresh_inspector()
+
+    def _on_tag_deleted(self, tag_id: int):
+        self._queries.delete_tag(tag_id)
+        self._sidebar.refresh()
+        self._model.refresh()
+        self._refresh_inspector()
 
     def _do_add_tag(self, asset_id: int, tag_id: int):
         self._queries.add_tag_to_asset(asset_id, tag_id)
@@ -607,7 +626,6 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Moved to recycle bin — {self._model.rowCount()} total")
 
     def _trash_asset(self, asset):
-        import send2trash
         try:
             send2trash.send2trash(str(asset.filepath))
         except Exception:
@@ -692,15 +710,46 @@ class MainWindow(QMainWindow):
         if asset is None:
             return
         self._queries.update_scan_state(asset_id, "pending")
+        self._queries.clear_scan_results(asset_id)
         report = scan_file(asset.filepath)
         if report.contents:
             self._queries.insert_scan_results(asset_id, report.contents)
         self._queries.update_scan_state(asset_id, "done")
-        # Mark thumbnail for regeneration (cover label may have been set)
         self._queries.update_thumbnail(asset_id, None, "pending")
         self._refresh_inspector()
         self._start_background_thumbs()
         self._status_label.setText(f"Re-scanned: {asset.filename}")
+
+    def _on_rescan_all(self):
+        asset_ids = self._queries.get_all_asset_ids()
+        if not asset_ids:
+            self._status_label.setText("No assets to rescan.")
+            return
+        reply = QMessageBox.question(
+            self, "Rescan All Assets",
+            f"Rescan {len(asset_ids)} asset(s)?\n\nThis may take a while.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._status_label.setText(f"Rescanning {len(asset_ids)} assets...")
+        for i, aid in enumerate(asset_ids):
+            asset = self._queries.get_asset(aid)
+            if asset is None or not asset.filepath.exists():
+                continue
+            self._queries.clear_scan_results(aid)
+            try:
+                report = scan_file(asset.filepath)
+                if report.contents:
+                    self._queries.insert_scan_results(aid, report.contents)
+                self._queries.update_scan_state(aid, "done")
+            except Exception:
+                pass
+            if (i + 1) % 10 == 0:
+                self._status_label.setText(f"Rescanning... {i + 1}/{len(asset_ids)}")
+        self._status_label.setText(f"Rescanned {len(asset_ids)} assets.")
+        self._model.refresh()
+        self._sidebar.refresh()
 
     # ── Helpers ─────────────────────────────────────────────
 
@@ -884,7 +933,6 @@ class MainWindow(QMainWindow):
         list_layout.setSpacing(4)
         list_layout.setContentsMargins(0, 0, 0, 0)
 
-        from vrc_organizer.models.asset import Asset
         for asset_id, dest_path in list(conflicts.items())[:20]:
             asset = affected_map.get(asset_id)
             if asset is None:
@@ -962,15 +1010,15 @@ class MainWindow(QMainWindow):
         self._thumb_worker.signals.finished.connect(self._on_thumbs_finished)
         QThreadPool.globalInstance().start(self._thumb_worker)
 
-    def _on_review_tags(self):
-        dlg = TagReviewerDialog(self._queries, self._app.thumb_cache_dir, self)
-        dlg.review_complete.connect(lambda: self._sidebar.refresh())
-        dlg.review_complete.connect(lambda: self._model.refresh())
+    def _on_label_tags(self):
+        dlg = TagLabelerDialog(self._queries, self._app.thumb_cache_dir, self)
+        dlg.labeling_complete.connect(lambda: self._sidebar.refresh())
+        dlg.labeling_complete.connect(lambda: self._model.refresh())
         dlg.exec()
 
-    def _on_train_covers(self):
-        dlg = CoverTrainerDialog(self._queries, self)
-        dlg.training_complete.connect(self._regenerate_labeled_thumbs)
+    def _on_label_covers(self):
+        dlg = CoverLabelerDialog(self._queries, self._app.thumb_cache_dir, self)
+        dlg.labeling_complete.connect(self._regenerate_labeled_thumbs)
         dlg.exec()
 
     def _regenerate_labeled_thumbs(self):
@@ -985,7 +1033,6 @@ class MainWindow(QMainWindow):
         QThreadPool.globalInstance().start(self._thumb_worker)
 
     def _on_export_training(self):
-        import json
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Training Data", "training_data.json",
             "JSON Files (*.json);;All Files (*)"
@@ -1005,7 +1052,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export Failed", str(e))
 
     def _on_import_training(self):
-        import json
         path, _ = QFileDialog.getOpenFileName(
             self, "Import Training Data", "",
             "JSON Files (*.json);;All Files (*)"
@@ -1025,6 +1071,97 @@ class MainWindow(QMainWindow):
             f"Skipped {result.get('skipped', 0)} record(s) (asset not found)."
         )
         self._model.refresh()
+
+    def _on_purge_cache(self):
+        """Purge thumbnail cache and extracted asset packages."""
+        thumb_dir = self._app.thumb_cache_dir
+        library_str = self._queries.get_setting("library_dir", "")
+        library_dir = Path(library_str) if library_str else (
+            Path(os.environ.get("LOCALAPPDATA", "")) / "VrcAssetOrganizer" / "Library"
+        )
+
+        # Count what will be deleted
+        thumb_count = len(list(thumb_dir.glob("*.png"))) if thumb_dir.exists() else 0
+        lib_count = 0
+        lib_size = 0
+        if library_dir.exists():
+            for p in library_dir.iterdir():
+                lib_count += 1
+                if p.is_dir():
+                    lib_size += sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+                elif p.is_file():
+                    lib_size += p.stat().st_size
+
+        if thumb_count == 0 and lib_count == 0:
+            QMessageBox.information(self, "Nothing to Purge",
+                "No cached thumbnails or extracted packages found.")
+            return
+
+        thumb_size_str = f"{thumb_count} thumbnail(s)"
+        lib_size_str = f"{lib_count} item(s)" if lib_count else "none"
+        if lib_size:
+            if lib_size >= 1_000_000:
+                lib_size_str += f" ({lib_size / 1_000_000:.1f} MB)"
+            elif lib_size >= 1_000:
+                lib_size_str += f" ({lib_size / 1_000:.0f} KB)"
+
+        reply = QMessageBox.warning(
+            self, "Purge Cache & Packages",
+            f"This will permanently delete:\n\n"
+            f"  • {thumb_size_str} from thumbnail cache\n"
+            f"  • {lib_size_str} from extracted packages\n\n"
+            f"Thumbnails will regenerate on next browse.\n"
+            f"Extracted packages will be re-extracted if needed.\n\n"
+            f"Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        purged_thumbs = 0
+        errors = []
+
+        # Purge thumbnail cache
+        if thumb_dir.exists():
+            for f in thumb_dir.glob("*.png"):
+                try:
+                    f.unlink()
+                    purged_thumbs += 1
+                except OSError as e:
+                    errors.append(str(f))
+
+        # Purge extracted packages
+        purged_libs = 0
+        if library_dir.exists():
+            for p in library_dir.iterdir():
+                try:
+                    if p.is_dir():
+                        shutil.rmtree(p)
+                    else:
+                        p.unlink()
+                    purged_libs += 1
+                except OSError as e:
+                    errors.append(str(p))
+
+        if errors:
+            QMessageBox.warning(
+                self, "Purge Complete (with errors)",
+                f"Purged {purged_thumbs} thumbnail(s) and {purged_libs} package(s).\n\n"
+                f"Failed to remove {len(errors)} item(s):\n"
+                + "\n".join(errors[:5]) +
+                ("\n..." if len(errors) > 5 else "")
+            )
+        else:
+            QMessageBox.information(
+                self, "Purge Complete",
+                f"Purged {purged_thumbs} thumbnail(s) and {purged_libs} package(s)."
+            )
+
+        # Reset thumb state for all assets so they regenerate
+        self._queries.reset_all_thumbs_pending()
+        QPixmapCache.clear()
+        self._model.refresh()
+        self._sidebar.refresh()
 
     def _on_toggle_theme(self):
         self._theme.toggle()

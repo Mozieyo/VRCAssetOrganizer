@@ -3,6 +3,7 @@
 import re
 import sqlite3
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -84,17 +85,31 @@ class Queries:
             conn.commit()
 
     def reset_thumbs_for_labeled(self) -> int:
-        """Reset thumb_state to 'pending' for assets with cover_labels.
+        """Reset thumb_state to 'pending' for assets with cover labels.
 
-        After cover training, this lets ThumbWorker regenerate thumbnails
+        After cover labeling, this lets ThumbWorker regenerate thumbnails
         using the user-labeled cover image instead of the heuristic pick.
         """
         with self._db.write_connection() as conn:
             cur = conn.execute(
-                "UPDATE assets SET thumb_state = 'pending' "
-                "WHERE id IN (SELECT asset_id FROM cover_labels) "
+                "UPDATE assets SET thumb_state = 'pending', thumbnail = NULL "
+                "WHERE (id IN (SELECT asset_id FROM cover_labels_v2) "
+                "   OR id IN (SELECT asset_id FROM cover_labels)) "
                 "AND thumb_state IN ('ready', 'error') "
                 "AND trash_date IS NULL"
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def reset_all_thumbs_pending(self) -> int:
+        """Reset thumb_state to 'pending' for all non-trashed assets.
+
+        Used after purging the thumbnail cache so all assets regenerate thumbnails.
+        """
+        with self._db.write_connection() as conn:
+            cur = conn.execute(
+                "UPDATE assets SET thumb_state = 'pending', thumbnail = NULL "
+                "WHERE trash_date IS NULL"
             )
             conn.commit()
             return cur.rowcount
@@ -264,6 +279,13 @@ class Queries:
                 (name, color)
             )
             row = cur.fetchone()
+            if row:
+                conn.commit()
+                return row[0]
+            # Tag already exists - fetch its ID
+            row = conn.execute(
+                "SELECT id FROM tags WHERE name = ?", (name,)
+            ).fetchone()
             conn.commit()
             return row[0] if row else 0
 
@@ -303,6 +325,22 @@ class Queries:
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
             conn.commit()
 
+    def rename_tag(self, tag_id: int, new_name: str):
+        with self._db.write_connection() as conn:
+            conn.execute("UPDATE tags SET name = ? WHERE id = ?", (new_name, tag_id))
+            conn.commit()
+
+    def get_tag_usage_count(self, tag_id: int) -> int:
+        """Return how many non-trashed assets use this tag."""
+        with self._db.connection() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM asset_tags at
+                   INNER JOIN assets a ON a.id = at.asset_id
+                   WHERE at.tag_id = ? AND a.trash_date IS NULL""",
+                (tag_id,)
+            ).fetchone()
+            return row[0] if row else 0
+
     def add_tag_to_asset(self, asset_id: int, tag_id: int):
         with self._db.write_connection() as conn:
             conn.execute(
@@ -334,6 +372,11 @@ class Queries:
 
     # ── Scan Results ─────────────────────────────────────────
 
+    def clear_scan_results(self, asset_id: int):
+        with self._db.write_connection() as conn:
+            conn.execute("DELETE FROM scan_results WHERE asset_id = ?", (asset_id,))
+            conn.commit()
+
     def insert_scan_results(self, asset_id: int,
                             entries: list[tuple[str, str, int]]):
         with self._db.write_connection() as conn:
@@ -344,6 +387,13 @@ class Queries:
                 [(asset_id, name, etype, size) for name, etype, size in entries]
             )
             conn.commit()
+
+    def get_all_asset_ids(self) -> list[int]:
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM assets WHERE trash_date IS NULL"
+            ).fetchall()
+            return [r[0] for r in rows]
 
     def get_scan_results(self, asset_id: int) -> list[tuple[str, str, int]]:
         with self._db.connection() as conn:
@@ -391,32 +441,31 @@ class Queries:
             )
             conn.commit()
 
-    # ── Cover Label Training ─────────────────────────────────
+    # ── Labeling for ML Training ───────────────────────────────
 
-    def get_trainable_assets(self, limit: int = 200) -> list[Asset]:
-        """Return assets with image entries in scan_results but no cover_label yet."""
+    def get_unlabeled_cover_assets(self, limit: int = 50) -> list[Asset]:
+        """Return assets with images but no cover label yet."""
         with self._db.connection() as conn:
             rows = conn.execute(
                 """SELECT DISTINCT a.* FROM assets a
                    INNER JOIN scan_results sr ON a.id = sr.asset_id
                    WHERE sr.entry_type = 'image'
                      AND a.trash_date IS NULL
-                     AND a.id NOT IN (SELECT asset_id FROM cover_labels)
-                   ORDER BY a.date_added DESC
-                   LIMIT ?""",
+                     AND a.id NOT IN (SELECT asset_id FROM cover_labels_v2)
+                   ORDER BY a.date_added DESC LIMIT ?""",
                 (limit,)
             ).fetchall()
             return [asset_from_row(r) for r in rows]
 
-    def get_unreviewed_tagged_assets(self, limit: int = 50) -> list[Asset]:
-        """Return recently imported assets with tags that haven't been reviewed yet."""
+    def get_unlabeled_tag_assets(self, limit: int = 50) -> list[Asset]:
+        """Return assets with tags that haven't been labeled yet."""
         with self._db.connection() as conn:
             rows = conn.execute(
                 """SELECT DISTINCT a.* FROM assets a
                    INNER JOIN asset_tags at ON a.id = at.asset_id
                    WHERE a.trash_date IS NULL
-                     AND a.id NOT IN (SELECT DISTINCT asset_id FROM tag_reviews)
-                   GROUP BY a.id ORDER BY a.date_added DESC LIMIT ?""",
+                     AND a.id NOT IN (SELECT asset_id FROM tag_labels)
+                   ORDER BY a.date_added DESC LIMIT ?""",
                 (limit,)
             ).fetchall()
             return [asset_from_row(r) for r in rows]
@@ -425,24 +474,55 @@ class Queries:
         """Return the labeled cover image name for an asset, or None."""
         with self._db.connection() as conn:
             row = conn.execute(
+                "SELECT image_name FROM cover_labels_v2 WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+            if row:
+                return row[0]
+            row = conn.execute(
                 "SELECT image_name FROM cover_labels WHERE asset_id = ?", (asset_id,)
             ).fetchone()
             return row[0] if row else None
 
-    def save_cover_label(self, asset_id: int, image_name: str):
+    def save_cover_label_v2(
+        self, asset_id: int, image_name: str,
+        image_width: int = 0, image_height: int = 0,
+        archive_depth: int = 0, filename_score: int = 0,
+        images_shown: int = 0
+    ):
+        """Save cover label with ML training metadata."""
         with self._db.write_connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO cover_labels_v2
+                   (asset_id, image_name, image_width, image_height,
+                    archive_depth, filename_score, images_shown)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (asset_id, image_name, image_width, image_height,
+                 archive_depth, filename_score, images_shown)
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO cover_labels (asset_id, image_name) VALUES (?, ?)",
                 (asset_id, image_name)
             )
             conn.commit()
 
-    def save_tag_review(self, asset_id: int, tag_id: int, accepted: bool):
+    def save_tag_label(
+        self, asset_id: int, session_id: str,
+        original_tags: list[int], accepted_tags: list[int],
+        rejected_tags: list[int], added_tags: list[int],
+        genre_tag_id: int | None
+    ):
+        """Save tag labeling session with ML training metadata."""
+        import json
         with self._db.write_connection() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO tag_reviews (asset_id, tag_id, accepted) "
-                "VALUES (?, ?, ?)",
-                (asset_id, tag_id, 1 if accepted else 0)
+                """INSERT OR REPLACE INTO tag_labels
+                   (asset_id, session_id, original_tags, accepted_tags,
+                    rejected_tags, added_tags, genre_tag_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (asset_id, session_id,
+                 json.dumps(original_tags), json.dumps(accepted_tags),
+                 json.dumps(rejected_tags), json.dumps(added_tags),
+                 genre_tag_id)
             )
             conn.commit()
 
@@ -480,8 +560,6 @@ class Queries:
 
     def export_training_data(self) -> dict:
         """Export cover_labels and tag_reviews keyed by asset filename for portability."""
-        import json
-        from datetime import datetime, timezone
         with self._db.connection() as conn:
             cover_rows = conn.execute(
                 """SELECT a.filename, cl.image_name

@@ -1,6 +1,6 @@
 ﻿{
   "name": "VrcAssetOrganizer",
-  "version": "0.1.0",
+  "version": "0.0.2-alpha",
   "description": "Desktop asset manager for VRchat avatar creators — organizes, tags, and browses 3D assets downloaded from online marketplaces",
   "author": "Moji",
   "license": "MIT",
@@ -40,7 +40,7 @@
     "busyTimeout": 5000,
     "foreignKeys": "ON",
     "fulltext": "FTS5 (external content table on assets)",
-    "schemaVersion": 4,
+    "schemaVersion": 8,
     "schema": {
       "assets": {
         "columns": [
@@ -122,6 +122,59 @@
           {"name": "chosen_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"},
           {"name": "", "type": "", "constraints": "PRIMARY KEY (asset_id, image_name)"}
         ]
+      },
+      "tag_reviews": {
+        "added": "v5",
+        "columns": [
+          {"name": "asset_id", "type": "INTEGER", "constraints": "REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "tag_id", "type": "INTEGER", "constraints": "REFERENCES tags(id) ON DELETE CASCADE"},
+          {"name": "accepted", "type": "INTEGER", "constraints": "NOT NULL DEFAULT 1"},
+          {"name": "reviewed_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"},
+          {"name": "", "type": "", "constraints": "PRIMARY KEY (asset_id, tag_id)"}
+        ],
+        "description": "Records user accept/reject decisions on auto-assigned tags per asset"
+      },
+      "tag_cooccurrence": {
+        "added": "v6",
+        "columns": [
+          {"name": "tag_a_id", "type": "INTEGER", "constraints": "REFERENCES tags(id) ON DELETE CASCADE"},
+          {"name": "tag_b_id", "type": "INTEGER", "constraints": "REFERENCES tags(id) ON DELETE CASCADE"},
+          {"name": "count", "type": "INTEGER", "constraints": "NOT NULL DEFAULT 1"},
+          {"name": "", "type": "", "constraints": "PRIMARY KEY (tag_a_id, tag_b_id)"}
+        ],
+        "indexes": ["tag_a_id", "tag_b_id"],
+        "description": "Tracks co-occurrence counts between tag pairs for suggestion ranking"
+      },
+      "cover_labels_v2": {
+        "added": "v7",
+        "columns": [
+          {"name": "asset_id", "type": "INTEGER", "constraints": "PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "image_name", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "image_width", "type": "INTEGER"},
+          {"name": "image_height", "type": "INTEGER"},
+          {"name": "archive_depth", "type": "INTEGER"},
+          {"name": "filename_score", "type": "INTEGER"},
+          {"name": "images_shown", "type": "INTEGER"},
+          {"name": "chosen_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"}
+        ],
+        "description": "Enhanced cover labels with image metadata for ML training — one best cover per asset"
+      },
+      "tag_labels": {
+        "added": "v7",
+        "columns": [
+          {"name": "id", "type": "INTEGER", "constraints": "PRIMARY KEY AUTOINCREMENT"},
+          {"name": "asset_id", "type": "INTEGER", "constraints": "REFERENCES assets(id) ON DELETE CASCADE"},
+          {"name": "session_id", "type": "TEXT", "constraints": "NOT NULL"},
+          {"name": "original_tags", "type": "TEXT"},
+          {"name": "accepted_tags", "type": "TEXT"},
+          {"name": "rejected_tags", "type": "TEXT"},
+          {"name": "added_tags", "type": "TEXT"},
+          {"name": "genre_tag_id", "type": "INTEGER", "constraints": "REFERENCES tags(id)"},
+          {"name": "labeled_at", "type": "REAL", "constraints": "DEFAULT (strftime('%s', 'now'))"},
+          {"name": "", "type": "", "constraints": "UNIQUE(asset_id, session_id)"}
+        ],
+        "indexes": ["asset_id", "session_id"],
+        "description": "Tag labeling session records for ML training — stores accept/reject decisions in JSON arrays"
       }
     }
   },
@@ -166,7 +219,7 @@
     },
     "autoTagging": {
       "module": "vrc_organizer.auto_tagger",
-      "dictionaries": "vrc_organizer.tag_data (TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS)",
+      "dictionaries": "vrc_organizer.tag_data (TOP_AVATARS, WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS)",
       "flow": "ImportWorker._import_one → suggest_tags(filename, extracted_path) → suggest_genre(filename, filetype, tag_names) → add all to asset"
     }
   },
@@ -183,7 +236,7 @@
 
   "componentTree": {
     "MainWindow (QMainWindow)": {
-      "menuBar": ["File (Import Files, Import Folder, Exit)", "Edit (Select All Ctrl+A)", "View (Inspector toggle)", "Preferences (Dark Mode, Unity Path, Storage Path, Settings...)", "Tools (Batch Thumbnails, Manage Tags)", "Help (About)"],
+      "menuBar": ["File (Import Files, Import Folder, Exit)", "Edit (Select All Ctrl+A)", "View (Inspector toggle)", "Preferences (Dark Mode, Unity Path, Storage Path, Settings...)", "Tools (Batch Thumbnails, Label Tags, Label Covers, Manage Tags, Export Training Data, Import Training Data, Purge Cache & Packages)", "Help (About)"],
       "toolbar": ["SearchBar (QLineEdit)", "SearchAll checkbox", "Grid slider (1-10 columns)"],
       "central": "QSplitter { Sidebar | gridPanel { AssetListView } }",
       "inspectorDock": "QDockWidget { InspectorPanel }",
@@ -231,9 +284,12 @@
     "TagManagement": "InspectorPanel.tag_added/tag_removed → MainWindow._do_add_tag/_on_tag_removed → _refresh_inspector_for(asset_id) + model.refresh + sidebar.refresh",
     "GenreChange": "InspectorPanel genre chip toggled → _on_genre_chip_toggled → remove old genre tag + add new genre tag",
     "ToolLaunch": "InspectorPanel.open_with / AssetContextMenu.open_in → MainWindow._on_open_with → ToolRegistry.get() → ToolLauncher.launch() → subprocess.Popen",
+    "TagLabeling": "Tools > Label Tags → TagLabelerDialog(queries, thumb_cache_dir) → user toggles tag chips + selects genre + adds via search → save_tag_label → labeling_complete → sidebar.refresh + model.refresh",
+    "CoverLabeling": "Tools > Label Covers → CoverLabelerDialog(queries, thumb_cache_dir) → user clicks best cover image (keyboard 1-6) or selects cached fallback → save_cover_label_v2 → labeling_complete → _regenerate_labeled_thumbs → ThumbWorker",
     "Selection": "AssetListView.selectionModel().selectionChanged → MainWindow._on_selection_changed → InspectorPanel.show_asset(asset)",
     "BodyMap": "BodyMapWidget.segment_toggled → Sidebar._on_body_segment_toggled → _emit_filters → tag_filter_changed",
-    "ContextMenu": "AssetListView.customContextMenuRequested → MainWindow._on_context_menu → AssetContextMenu.exec()"
+    "ContextMenu": "AssetListView.customContextMenuRequested → MainWindow._on_context_menu → AssetContextMenu.exec()",
+    "PurgeCache": "Tools > Purge Cache & Packages → MainWindow._on_purge_cache → delete thumbnails/*.png + library/* → queries.reset_all_thumbs_pending() → model.refresh() + sidebar.refresh()"
   },
 
   "threadingModel": {
@@ -249,16 +305,24 @@
     "persistence": "none (resets to light on restart)"
   },
 
+  "codeQuality": {
+    "importStyle": "All imports at file top — no inline imports inside functions",
+    "caching": "AssetListModel uses _asset_cache dict to avoid N+1 queries when rendering thumbnails",
+    "stateSync": "Sidebar preserves _genre_ids and _avatar_ids across chip rebuild, restoring checked state after recreation",
+    "helpers": "Inspector uses _find_or_create_tag() helper to DRY up tag lookup/creation",
+    "singleInstance": "app.py uses Win32 named mutex for reliable single-instance check"
+  },
+
   "directoryLayout": {
     "vrc_organizer/": "Application package",
-    "vrc_organizer/ui/": "Qt UI components (main_window, sidebar, inspector, thumbnail_grid, body_map, context_menu, tag_dialog, settings_dialog, drop_overlay, theme, chip_button, flow_layout, cover_trainer)",
+    "vrc_organizer/ui/": "Qt UI components (main_window, sidebar, inspector, thumbnail_grid, body_map, context_menu, tag_dialog, tag_labeler, settings_dialog, drop_overlay, theme, chip_button, flow_layout, cover_labeler)",
     "vrc_organizer/database/": "SQLite schema, connection pool, query layer",
     "vrc_organizer/scanner/": "File-type scanners (booth_zip, unitypackage, rarfile_scanner, blend, fbx, image, generic + orchestrator)",
-    "vrc_organizer/workers/": "Async QRunnable workers (import, thumb) + base class",
+    "vrc_organizer/workers/": "Async QRunnable workers (import, thumb, watcher) + base class. Note: watcher.py is defined but not yet wired up.",
     "vrc_organizer/tools/": "External tool registry and launcher",
     "vrc_organizer/models/": "Data classes (Asset, Tag, ScanResult)",
     "vrc_organizer/auto_tagger.py": "Auto-tag engine — tokenization, WORD_TO_TAG matching, avatar detection, genre classification",
-    "vrc_organizer/tag_data.py": "Tag dictionaries — TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS",
+    "vrc_organizer/tag_data.py": "Tag dictionaries — TOP_AVATARS, WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY, GENRE_KEYWORDS",
     "vrc_organizer/unity_windows.py": "Win32 API for detecting running Unity Editor windows",
     "build.py": "PyInstaller build orchestrator with aggressive Qt module exclusions"
   }

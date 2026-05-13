@@ -34,19 +34,27 @@ def _read_guid_pathnames(tf: tarfile.TarFile) -> dict[str, str]:
 
 
 def _resolve_display_name(raw_name: str, guid_names: dict[str, str]) -> str | None:
-    """Resolve a tar entry name to a human-readable path. Returns None for noise files."""
-    # Skip binary asset and meta files
+    """Resolve a tar entry name to a human-readable path. Returns None for noise files.
+
+    In unitypackages, content is stored as GUID/asset where:
+    - GUID/pathname contains the original Unity path (e.g., "Assets/Textures/Skin.png")
+    - GUID/asset contains the actual file content
+    - GUID/asset.meta contains Unity metadata
+    - GUID/preview.png is an optional preview (NOT the main asset)
+    """
     base = raw_name.rsplit("/", 1)[-1] if "/" in raw_name else raw_name
-    if base == "asset" or base.endswith(".meta") or base.endswith(".resS"):
-        return None
-    if raw_name.endswith("/pathname"):
+    guid = raw_name.split("/", 1)[0] if "/" in raw_name else ""
+
+    # Only process files named "asset" - these are the actual content
+    # Skip everything else: pathname, .meta, preview.png, etc.
+    if base != "asset":
         return None
 
-    guid = raw_name.split("/", 1)[0] if "/" in raw_name else ""
+    # Use pathname as display name
     if guid in guid_names:
-        rest = raw_name[len(guid) + 1:]
-        return f"{guid_names[guid]}/{rest}"
-    return raw_name
+        return guid_names[guid]
+
+    return None  # No pathname found, can't determine real name
 
 
 def scan_unitypackage(filepath: Path) -> ScanReport:
@@ -70,15 +78,39 @@ def scan_unitypackage(filepath: Path) -> ScanReport:
             name = member.name
             size = member.size
 
+            # Thumbnail: check raw name before filtering non-asset entries.
+            # preview.png and similar are good thumbnail candidates even
+            # though _resolve_display_name returns None for them.
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) and size < MAX_THUMB_SOURCE:
+                score = _thumb_score(name, size)
+                if score > best_thumb_score:
+                    best_thumb_score = score
+                    try:
+                        f = tf.extractfile(member)
+                        if f:
+                            raw = f.read()
+                            img = Image.open(io.BytesIO(raw))
+                            if img.mode in ("RGBA", "P"):
+                                img = img.convert("RGBA")
+                            else:
+                                img = img.convert("RGB")
+                            img.thumbnail(THUMB_SIZE, Image.LANCZOS)
+                            buf = io.BytesIO()
+                            img.save(buf, format="PNG")
+                            best_thumb_data = buf.getvalue()
+                    except Exception:
+                        pass
+
             display_name = _resolve_display_name(name, guid_names)
             if display_name is None:
                 continue
 
-            entry_type, _ = classify(Path(name))
+            # Classify based on resolved display name, not raw tar member name
+            entry_type, _ = classify(Path(display_name))
             contents.append((display_name, entry_type, size))
 
-            # Thumbnail selection
-            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")) and size < MAX_THUMB_SOURCE:
+            # Thumbnail selection - check resolved display name too
+            if display_name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) and size < MAX_THUMB_SOURCE:
                 score = _thumb_score(display_name, size)
                 if score > best_thumb_score:
                     best_thumb_score = score

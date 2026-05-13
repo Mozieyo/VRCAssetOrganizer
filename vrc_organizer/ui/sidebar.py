@@ -11,6 +11,7 @@ from vrc_organizer.tag_data import ALL_AVATAR_NAMES, GENRE_NAMES, TOP_AVATARS
 from vrc_organizer.ui.body_map import BodyMapWidget
 from vrc_organizer.ui.chip_button import ChipToggleButton
 from vrc_organizer.ui.flow_layout import FlowLayout
+from vrc_organizer.ui.inspector import AddTagChip
 
 
 _COLLAPSED_STYLE = (
@@ -150,11 +151,15 @@ class Sidebar(QWidget):
     def _rebuild_tag_chips(self):
         while self._tag_chips_layout.count():
             item = self._tag_chips_layout.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+            w = item.widget() if item else None
+            if w and not isinstance(w, AddTagChip):
+                w.hide()
+                w.deleteLater()
         self._tag_chips.clear()
         self._tag_cache.clear()
 
+        selected_chips = []
+        unselected_chips = []
         for tag_id, name, color, count in self._queries.get_all_tags():
             self._tag_cache[name] = tag_id
             if name in GENRE_NAMES or name in ALL_AVATAR_NAMES:
@@ -164,21 +169,45 @@ class Sidebar(QWidget):
             chip.toggled.connect(
                 lambda checked, tid=tag_id: self._on_tag_chip_toggled(tid, checked)
             )
-            self._tag_chips_layout.addWidget(chip)
             self._tag_chips[tag_id] = chip
+            if tag_id in self._and_ids:
+                chip.set_active(True)
+                selected_chips.append(chip)
+            else:
+                unselected_chips.append(chip)
+
+        # Rebuild: selected → '+' → unselected
+        for chip in selected_chips:
+            self._tag_chips_layout.addWidget(chip)
+        if not hasattr(self, '_tag_add_chip'):
+            self._tag_add_chip = AddTagChip()
+            self._tag_add_chip.tag_created.connect(self._on_sidebar_add_tag)
+        self._tag_chips_layout.addWidget(self._tag_add_chip)
+        for chip in unselected_chips:
+            self._tag_chips_layout.addWidget(chip)
 
     def _on_tag_chip_toggled(self, tag_id: int, checked: bool):
         self._emit_filters()
 
     def refresh(self):
+        # Preserve checked state across rebuild — chips are recreated so we
+        # must keep the id sets that track what the user has selected.
+        saved_and_ids = list(self._and_ids)
         self._rebuild_tag_chips()
         self._rebuild_avatar_chips()
+        # Restore AND-filter chip state from before the rebuild
+        for tag_id, chip in self._tag_chips.items():
+            if tag_id in saved_and_ids:
+                chip.set_active(True)
+        self._emit_filters()
 
     def _rebuild_avatar_chips(self):
         while self._avatar_flow.count():
             item = self._avatar_flow.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+            w = item.widget() if item else None
+            if w and not isinstance(w, AddTagChip):
+                w.hide()
+                w.deleteLater()
         self._avatar_chips.clear()
 
         avatar_counts: dict[str, tuple[int, int]] = {}  # name → (tag_id, count)
@@ -187,6 +216,8 @@ class Sidebar(QWidget):
                 avatar_counts[name] = (tag_id, count)
                 self._tag_cache[name] = tag_id
 
+        selected_chips = []
+        unselected_chips = []
         for name in TOP_AVATARS:
             if name not in avatar_counts:
                 continue
@@ -195,11 +226,23 @@ class Sidebar(QWidget):
                 continue
             chip = ChipToggleButton(f"{name} ({count})")
             chip.toggled.connect(lambda checked, n=name: self._on_avatar_chip_toggled(n, checked))
-            self._avatar_flow.addWidget(chip)
             self._avatar_chips[name] = chip
             # Restore checked state if this avatar is in the active filter
             if tag_id in self._avatar_ids:
                 chip.set_active(True)
+                selected_chips.append(chip)
+            else:
+                unselected_chips.append(chip)
+
+        # Rebuild: selected → '+' → unselected
+        for chip in selected_chips:
+            self._avatar_flow.addWidget(chip)
+        if not hasattr(self, '_avatar_add_chip'):
+            self._avatar_add_chip = AddTagChip()
+            self._avatar_add_chip.tag_created.connect(self._on_sidebar_add_avatar)
+        self._avatar_flow.addWidget(self._avatar_add_chip)
+        for chip in unselected_chips:
+            self._avatar_flow.addWidget(chip)
 
     # ── Genre (mutually exclusive via ChipToggleButton exclusive_group) ──
 
@@ -219,6 +262,23 @@ class Sidebar(QWidget):
         self._emit_filters()
 
     # ── Avatar chips ──
+
+    def _on_sidebar_add_avatar(self, name: str):
+        """Create a new avatar tag from the '+' chip."""
+        existing = self._queries.get_tag_by_name(name)
+        tag_id = existing[0] if existing else self._queries.create_tag(name, "#8b5cf6")
+        if tag_id:
+            self._avatar_ids.add(tag_id)
+            self.refresh()
+            self._emit_filters()
+
+    def _on_sidebar_add_tag(self, name: str):
+        """Create a new additional tag from the '+' chip."""
+        existing = self._queries.get_tag_by_name(name)
+        tag_id = existing[0] if existing else self._queries.create_tag(name)
+        if tag_id:
+            self.refresh()
+            self._emit_filters()
 
     def _on_avatar_chip_toggled(self, name: str, checked: bool):
         tag_id = self._find_tag_by_name(name)

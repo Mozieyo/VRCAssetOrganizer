@@ -176,7 +176,7 @@ class ImportWorker(BaseWorker):
         return None
 
     def _save_thumbnail(self, asset_id: int, data: bytes) -> Path:
-        thumb_path = self._thumb_cache_dir / f"{asset_id}.webp"
+        thumb_path = self._thumb_cache_dir / f"{asset_id}.png"
         thumb_path.parent.mkdir(parents=True, exist_ok=True)
         thumb_path.write_bytes(data)
         return thumb_path

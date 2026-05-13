@@ -5,7 +5,7 @@ from PySide6.QtGui import (
     QPainter, QPainterPath, QPen, QBrush, QColor, QFont,
     QPolygonF, QFontMetrics, QPalette,
 )
-from PySide6.QtWidgets import QWidget, QSizePolicy
+from PySide6.QtWidgets import QWidget, QSizePolicy, QApplication
 
 # Body segment definitions with label, color, and tag mapping
 SEGMENTS = [
@@ -186,6 +186,14 @@ class BodyMapWidget(QWidget):
         bg = self.palette().color(QPalette.Window)
         painter.fillRect(self.rect(), bg)
 
+        is_dark = QApplication.instance().palette().color(QPalette.Window).lightness() < 128
+        if is_dark:
+            inactive_fill = QColor(55, 65, 81)   # #374151
+            inactive_pen = QColor(75, 85, 99)    # #4b5563
+        else:
+            inactive_fill = QColor(226, 232, 240)
+            inactive_pen = QColor(203, 213, 225)
+
         for seg_key, seg_label, seg_color in SEGMENTS:
             path = self._paths.get(seg_key)
             if path is None:
@@ -202,8 +210,8 @@ class BodyMapWidget(QWidget):
                 painter.setBrush(QBrush(seg_color.lighter(180)))
                 painter.setPen(QPen(seg_color, 2))
             else:
-                painter.setBrush(QBrush(QColor(226, 232, 240)))
-                painter.setPen(QPen(QColor(203, 213, 225), 1))
+                painter.setBrush(QBrush(inactive_fill))
+                painter.setPen(QPen(inactive_pen, 1))
 
             painter.drawPath(path)
 

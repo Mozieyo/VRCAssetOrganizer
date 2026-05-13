@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Iterable
 
-from vrc_organizer.tag_data import TOP_AVATARS, WORD_TO_TAG, JP_TO_EN, JP_AVATAR_TO_EN, TAG_HIERARCHY
+from vrc_organizer.tag_data import TOP_AVATARS, WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY
 from vrc_organizer.database.queries import Queries
 
 
@@ -69,12 +69,6 @@ def suggest_tags(
                 if len(token) >= 2 and (token == jp_name or jp_name in token):
                     suggested_names.add(en_tag)
 
-        # Japanese dictionary matching
-        for token in tokens:
-            for jp_word, en_tag in JP_TO_EN.items():
-                if jp_word in token or (len(jp_word) >= 2 and token in jp_word):
-                    suggested_names.add(en_tag)
-
     # Apply hierarchy: if a child tag is detected, add its parent
     hierarchy_additions: set[str] = set()
     for tag_name in suggested_names.copy():
@@ -130,31 +124,28 @@ GENRE_KEYWORDS: dict[str, list[str]] = {
 }
 
 OUTFIT_ACCE_TAGS = {
+    # Clothing
     "Outfit", "Dress", "Skirt", "Pants", "Shorts", "Shirt",
     "Jacket", "Sweater", "Hoodie", "Vest", "Coat", "Tank Top",
-    "Crop Top", "Suit", "Casual", "Formal", "Gothic", "Lolita",
-    "Cyberpunk", "Fantasy", "Idol Outfit", "Kimono", "Yukata",
-    "Swimsuit", "Lingerie", "Pajamas", "Sportswear",
-    "Maid", "School Uniform", "Military Uniform",
+    "Crop Top", "Suit", "Gothic", "Lolita", "Cyberpunk", "Fantasy",
+    "Idol Outfit", "Kimono", "Yukata", "Swimsuit", "Lingerie",
+    "Pajamas", "Sportswear", "Maid", "School Uniform", "Military Uniform",
+    # Footwear / Legwear
+    "Shoes", "Heels", "Boots", "Socks", "Stockings", "Gloves",
+    # Accessories
     "Accessory", "Hat", "Glasses", "Mask", "Necklace", "Choker",
-    "Earrings", "Bracelet", "Ring", "Brooch", "Bag", "Backpack",
+    "Earrings", "Bracelet", "Ring", "Bag", "Backpack",
     "Hair Accessory", "Ribbon", "Bow", "Collar", "Cape", "Scarf",
-    "Belt", "Shoes", "Heels", "Boots", "Socks", "Stockings",
-    "Gloves", "Tie", "Watch",
-    "Hair", "Hairstyle", "Bangs", "Ponytail", "Twin Tails",
-    "Bob Cut", "Long Hair", "Short Hair", "Braids", "Drill Hair",
-    "Ahoge", "Wings", "Tail", "Ears", "Horns", "Halo",
-    "Body", "Head", "Face", "Eyes", "Eyebrows", "Eyelashes",
-    "Mouth", "Nose", "Hands", "Feet", "Arms", "Legs",
-    "Skin", "Makeup", "Tattoo", "Scar", "Freckles", "Blush",
-    "Lipstick", "Muscle", "Slim", "Chibi",
-    "Texture", "Material", "Normal Map", "Albedo", "Emission",
+    "Belt", "Tie", "Watch", "Umbrella", "Crown", "Flower",
+    "Wings", "Tail", "Ears", "Horns", "Halo",
     "Weapon", "Shield", "Prop", "Pet",
-    "Kawaii", "Simple", "Realistic", "High Quality",
-    "Fur", "Lace", "Frill", "Leather", "Denim", "Silk",
-    "Velvet", "Transparent", "Glowing", "Jewelry", "Flower",
-    "Heart", "Star", "Crown", "Cross", "Feather", "Chain",
-    "Umbrella", "Whip",
+    # Hair
+    "Hair", "Hairstyle", "Bangs", "Ponytail", "Twin Tails",
+    "Bob Cut", "Long Hair", "Short Hair", "Braids", "Drill Hair", "Ahoge",
+    # Body mods
+    "Makeup", "Tattoo", "Chibi",
+    # Texture
+    "Texture", "Material",
 }
 
 
