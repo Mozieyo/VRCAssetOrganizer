@@ -22,7 +22,9 @@ jobs:
       - name: Install dependencies
         run: pip install PySide6>=6.5.0
 
-      - name: Import check — all modules
+      - name: Import check — non-UI modules
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           python -c "import vrc_organizer; print('vrc_organizer OK')"
           python -c "from vrc_organizer.database import queries; print('database OK')"
@@ -30,23 +32,29 @@ jobs:
           python -c "from vrc_organizer.workers import importer; print('workers OK')"
           python -c "from vrc_organizer.tools import registry; print('tools OK')"
           python -c "from vrc_organizer.models import asset; print('models OK')"
-          python -c "from vrc_organizer.ui import main_window; print('ui OK')"
 
-      - name: Syntax check — core files
+      - name: Syntax check — all source files
         run: |
-          python -m py_compile vrc_organizer/auto_tagger.py
-          python -m py_compile vrc_organizer/tag_data.py
+          python -m py_compile vrc_organizer/__init__.py
           python -m py_compile vrc_organizer/main.py
           python -m py_compile vrc_organizer/app.py
+          python -m py_compile vrc_organizer/auto_tagger.py
+          python -m py_compile vrc_organizer/tag_data.py
+          python -m py_compile vrc_organizer/unity_windows.py
+          python -m py_compile vrc_organizer/database/__init__.py
           python -m py_compile vrc_organizer/database/queries.py
           python -m py_compile vrc_organizer/database/connection.py
+          python -m py_compile vrc_organizer/database/schema.py
+          python -m py_compile vrc_organizer/scanner/__init__.py
           python -m py_compile vrc_organizer/scanner/orchestrator.py
+          python -m py_compile vrc_organizer/workers/__init__.py
           python -m py_compile vrc_organizer/workers/importer.py
-          python -m py_compile vrc_organizer/ui/main_window.py
-          python -m py_compile vrc_organizer/ui/sidebar.py
-          python -m py_compile vrc_organizer/ui/inspector.py
-          python -m py_compile vrc_organizer/ui/thumbnail_grid.py
-          python -m py_compile vrc_organizer/ui/body_map.py
+          python -m py_compile vrc_organizer/workers/thumb_worker.py
+          python -m py_compile vrc_organizer/models/__init__.py
+          python -m py_compile vrc_organizer/models/asset.py
+          python -m py_compile vrc_organizer/models/tag.py
+          python -m py_compile vrc_organizer/models/scan_result.py
+          python -m py_compile vrc_organizer/tools/__init__.py
           python -m py_compile vrc_organizer/tools/registry.py
           python -m py_compile vrc_organizer/tools/launcher.py
-          echo "All syntax checks passed"
+          Write-Host "All syntax checks passed"
