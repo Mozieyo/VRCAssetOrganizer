@@ -1,0 +1,61 @@
+name: Database Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  db:
+    runs-on: windows-latest
+    timeout-minutes: 3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Schema creation + table verification
+        shell: python
+        run: |
+          import sys, os, tempfile, sqlite3
+          sys.path.insert(0, os.getcwd())
+
+          from vrc_organizer.database.schema import init_schema, SCHEMA_VERSION
+
+          db_path = os.path.join(tempfile.gettempdir(), "ci_schema_test.db")
+          conn = sqlite3.connect(db_path)
+          conn.execute("PRAGMA foreign_keys = ON")
+
+          # Run full schema init (creates tables + runs all migrations)
+          init_schema(conn)
+
+          # Verify all required tables exist
+          tables = {r[0] for r in conn.execute(
+              "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+          ).fetchall()}
+
+          required = {
+              "assets", "tags", "asset_tags", "scan_results",
+              "settings", "schema_version", "assets_fts",
+              "cover_labels_v2", "tag_labels", "tag_cooccurrence",
+          }
+          missing = required - tables
+          if missing:
+              print(f"ERROR: Missing tables: {missing}")
+              sys.exit(1)
+
+          # Verify schema version
+          version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+          if version != SCHEMA_VERSION:
+              print(f"ERROR: Schema version {version} != expected {SCHEMA_VERSION}")
+              sys.exit(1)
+
+          conn.close()
+          os.unlink(db_path)
+
+          print(f"Schema v{SCHEMA_VERSION} OK — {len(required)} tables verified")
