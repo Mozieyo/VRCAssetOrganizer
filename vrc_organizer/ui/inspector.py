@@ -443,7 +443,9 @@ class InspectorPanel(QWidget):
             chip.deleteLater()
         self._avatar_search_chips.clear()
         self._avatar_search.clear()
-        self._clear_flow(self._tags_flow)
+        # Preserve cached "+" chips across an empty-state pass so quick
+        # reselection of an asset doesn't destroy any in-progress typing.
+        self._clear_flow(self._tags_flow, preserve=AddTagChip)
         if hasattr(self, '_avatar_add_chip'):
             try:
                 self._avatar_add_chip.hide()
@@ -544,15 +546,27 @@ class InspectorPanel(QWidget):
             else:
                 self._contents_tree.addTopLevelItem(child)
 
-    def _clear_flow(self, flow: FlowLayout):
+    def _clear_flow(self, flow: FlowLayout, preserve: type | None = None):
+        """Remove all widgets from `flow`. Instances of `preserve` are taken
+        out of the layout but not deleted, so callers can re-insert them.
+        This protects widgets that may hold user input state (e.g. an
+        AddTagChip mid-typing) from being destroyed on every refresh."""
         while flow.count():
             item = flow.takeAt(0)
-            if item and item.widget():
-                item.widget().hide()
-                item.widget().deleteLater()
+            if not item:
+                continue
+            w = item.widget()
+            if w is None:
+                continue
+            if preserve is not None and isinstance(w, preserve):
+                continue
+            w.hide()
+            w.deleteLater()
 
     def _refresh_tags(self):
-        self._clear_flow(self._tags_flow)
+        # Preserve the cached "+" chip so a user who is typing into it does
+        # not lose their input every time a tag change triggers a refresh.
+        self._clear_flow(self._tags_flow, preserve=AddTagChip)
 
         if self._asset is None:
             return
@@ -581,10 +595,11 @@ class InspectorPanel(QWidget):
             chip.delete_requested.connect(self._on_tag_deleted)
             self._tags_flow.addWidget(chip)
 
-        # Add inline creation chip after assigned tags
-        add_chip = AddTagChip()
-        add_chip.tag_created.connect(self._on_inline_tag_created)
-        self._tags_flow.addWidget(add_chip)
+        # Re-attach the cached "+" chip (creating it on first use)
+        if not hasattr(self, '_tags_add_chip'):
+            self._tags_add_chip = AddTagChip()
+            self._tags_add_chip.tag_created.connect(self._on_inline_tag_created)
+        self._tags_flow.addWidget(self._tags_add_chip)
 
         self._tags_flow.invalidate()
         self._tags_flow.activate()
@@ -601,31 +616,27 @@ class InspectorPanel(QWidget):
         self._reorder_avatar_flow(assigned_avatars)
 
     def _reorder_avatar_flow(self, assigned: set[str]):
-        """Reorder avatar flow: selected chips first, then '+' chip, then unselected."""
+        """Reorder avatar flow: selected chips first, then '+' chip, then unselected.
+
+        The cached chips (`self._avatar_chips`, `self._avatar_search_chips`,
+        `self._avatar_add_chip`) survive across refreshes — we only re-order
+        them in the layout. The previous version aggressively deleted any
+        widget not in the ChipToggleButton set, which always included the
+        AddTagChip and forced a recreation on every refresh, destroying any
+        mid-typing input the user had.
+        """
         # Update active states for base and search chips
         for name, chip in self._avatar_chips.items():
             chip.set_active(name in assigned)
         for name, chip in self._avatar_search_chips.items():
             chip.set_active(name in assigned)
 
-        # Remove all items from flow without deleting chip widgets
-        old_widgets: list[QWidget] = []
+        # Take all items out of the flow without deleting any widget — the
+        # cached chips remain parented to the container and ready to re-add.
         while self._avatar_flow.count():
-            item = self._avatar_flow.takeAt(0)
-            if item:
-                w = item.widget()
-                if w is not None:
-                    old_widgets.append(w)
+            self._avatar_flow.takeAt(0)
 
-        # Delete any non-chip widgets (old AddTagChips)
-        chip_set = set(self._avatar_chips.values()) | set(self._avatar_search_chips.values())
-        for w in old_widgets:
-            if w not in chip_set:
-                w.deleteLater()
-                if hasattr(self, '_avatar_add_chip') and w is self._avatar_add_chip:
-                    del self._avatar_add_chip
-
-        # Collect all chips, ordered: selected → unselected
+        # Order: selected → '+' → unselected
         all_chips: list[tuple[str, ChipToggleButton]] = []
         all_chips.extend(self._avatar_chips.items())
         all_chips.extend(self._avatar_search_chips.items())

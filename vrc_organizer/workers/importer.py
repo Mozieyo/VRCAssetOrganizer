@@ -103,33 +103,43 @@ class ImportWorker(BaseWorker):
 
         self._queries.update_scan_state(asset_id, "done")
 
-        # Auto-tag based on filename + extracted folder names
+        # Auto-tag based on filename + extracted folder names.
+        # Note: build the id↔name map AFTER suggest_tags runs — it may have
+        # created new tags, and the genre selector must see those names to
+        # classify correctly. The previous version snapshotted before
+        # suggest_tags, which silently dropped fresh tag IDs from the input
+        # to suggest_genre and produced wrong genres for assets that
+        # introduced new tags.
         try:
-            all_tags = self._queries.get_all_tags()  # single query, reused below
-            tag_ids = suggest_tags(self._queries, filepath.name, extracted_path)
-            for tag_id in tag_ids:
-                self._queries.add_tag_to_asset(asset_id, tag_id)
-
-            # Genre auto-classification (mutually exclusive — only one genre)
             from vrc_organizer.tag_data import GENRE_NAMES
-            asset_tags = self._queries.get_tags_for_asset(asset_id)
-            for tid, name, _ in asset_tags:
-                if name in GENRE_NAMES:
-                    self._queries.remove_tag_from_asset(asset_id, tid)
 
-            existing = {tid: name for tid, name, _, _ in all_tags}
-            tag_names = {existing[tid] for tid in tag_ids if tid in existing}
-            genre_name = suggest_genre(filepath.name, report.filetype, tag_names)
-            genre_id = next((tid for tid, name, _, _ in all_tags if name == genre_name), 0)
+            tag_ids = suggest_tags(self._queries, filepath.name, extracted_path)
+
+            all_tags = self._queries.get_all_tags()
+            id_to_name = {tid: name for tid, name, _, _ in all_tags}
+            name_to_id = {name: tid for tid, name, _, _ in all_tags}
+
+            suggested_names = {id_to_name[tid] for tid in tag_ids if tid in id_to_name}
+            genre_name = suggest_genre(filepath.name, report.filetype, suggested_names)
+            genre_id = name_to_id.get(genre_name)
             if not genre_id:
                 genre_id = self._queries.create_tag(genre_name, "#6366f1")
-            if genre_id:
-                self._queries.add_tag_to_asset(asset_id, genre_id)
-                tag_ids.append(genre_id)
 
-            # Record co-occurrence for all tags assigned to this asset
-            if len(tag_ids) >= 2:
-                self._queries.record_tag_cooccurrence(tag_ids)
+            # Build the final tag set: all non-genre suggestions plus the
+            # chosen genre. Insert each once — no add-then-remove churn, and
+            # the asset never briefly carries multiple genre tags.
+            final_ids: set[int] = {
+                tid for tid in tag_ids
+                if id_to_name.get(tid) not in GENRE_NAMES
+            }
+            if genre_id:
+                final_ids.add(genre_id)
+
+            for tag_id in final_ids:
+                self._queries.add_tag_to_asset(asset_id, tag_id)
+
+            if len(final_ids) >= 2:
+                self._queries.record_tag_cooccurrence(list(final_ids))
         except Exception:
             logger.warning("Auto-tagging failed for %s", filepath.name, exc_info=True)
 

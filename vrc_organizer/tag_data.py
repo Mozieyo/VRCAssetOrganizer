@@ -120,28 +120,29 @@ GENRE_TERMS: list[str] = [
 TAG_HIERARCHY: dict[str, set[str]] = {
     "Outfit": {
         "Dress", "Skirt", "Pants", "Shorts", "Shirt", "Jacket",
-        "Sweater", "Hoodie", "Vest", "Coat", "Tank Top", "Crop Top",
+        "Sweater", "Hoodie", "Vest", "Coat", "Tops",
+        "Bodysuit", "Corset", "Jumpsuit",
         "Maid", "School Uniform", "Military Uniform", "Kimono",
         "Yukata", "Swimsuit", "Lingerie", "Pajamas", "Sportswear",
         "Suit", "Gothic", "Lolita", "Cyberpunk", "Fantasy", "Idol Outfit",
-        "Shoes", "Heels", "Boots", "Socks", "Stockings", "Gloves",
+        "Wedding", "Bunny Suit",
+        "Shoes", "Heels", "Boots", "Sandals", "Socks", "Stockings", "Gloves",
     },
     "Accessory": {
         "Hat", "Glasses", "Mask", "Necklace", "Choker", "Earrings",
-        "Bracelet", "Ring", "Bag", "Backpack", "Hair Accessory",
-        "Ribbon", "Bow", "Collar", "Wings", "Tail", "Ears", "Horns",
-        "Halo", "Weapon", "Shield", "Prop", "Cape", "Scarf", "Belt",
-        "Tie", "Watch", "Umbrella", "Crown", "Flower",
+        "Bracelet", "Ring", "Bag", "Hair Accessory",
+        "Ribbon", "Collar", "Wings", "Tail", "Ears", "Horns",
+        "Weapon", "Shield", "Prop", "Cape", "Scarf", "Belt",
         "Eyes", "Eyebrows", "Eyelashes", "Fangs",
-        "Paws", "Claws", "Feathers", "Scales", "Whiskers",
+        "Paws", "Claws",
         "Piercings", "Chains", "Muscle",
     },
     "Hair": {
         "Hairstyle", "Bangs", "Ponytail", "Twin Tails", "Bob Cut",
-        "Long Hair", "Short Hair", "Braids", "Drill Hair", "Ahoge",
+        "Long Hair", "Short Hair", "Braids", "Ahoge",
     },
     "Material": {
-        "Texture", "Shader",
+        "Texture", "Shader", "lilToon", "Poiyomi",
     },
     "Expression": {
         "Gesture", "Animation", "Emote", "Pose", "Dance",
@@ -179,16 +180,17 @@ WORD_TO_TAG: dict[str, str] = {
     "lingerie": "Lingerie", "ランジェリー": "Lingerie", "下着": "Lingerie",
     "pajamas": "Pajamas", "パジャマ": "Pajamas",
     "sportswear": "Sportswear", "jersey": "Sportswear", "ジャージ": "Sportswear",
-    "suit": "Suit", "スーツ": "Suit", "tuxedo": "Suit", "フォーマル": "Suit",
+    "suit": "Suit", "スーツ": "Suit",
     "gothic": "Gothic", "ゴシック": "Gothic", "goth": "Gothic",
     "lolita": "Lolita", "ロリータ": "Lolita",
-    "cyberpunk": "Cyberpunk", "サイバー": "Cyberpunk", "cyber": "Cyber",
-    "steampunk": "Steampunk", "スチームパンク": "Steampunk",
-    "punk": "Punk", "パンク": "Punk",
+    "cyberpunk": "Cyberpunk", "サイバー": "Cyberpunk", "cyber": "Cyberpunk",
     "fantasy": "Fantasy", "ファンタジー": "Fantasy",
     "idol": "Idol Outfit", "アイドル": "Idol Outfit",
     "casual": "Casual", "カジュアル": "Casual",
-    "cosplay": "Cosplay", "コスプレ": "Cosplay",
+    "wedding": "Wedding", "ウェディング": "Wedding", "ウエディング": "Wedding",
+    "halloween": "Halloween", "ハロウィン": "Halloween",
+    "christmas": "Christmas", "クリスマス": "Christmas", "xmas": "Christmas",
+    "magical": "Magical Girl", "魔法少女": "Magical Girl", "magicalgirl": "Magical Girl",
 
     # ── Accessories ──
     "accessory": "Accessory", "アクセサリー": "Accessory", "アクセ": "Accessory",
@@ -203,7 +205,7 @@ WORD_TO_TAG: dict[str, str] = {
     "bag": "Bag", "バッグ": "Bag", "backpack": "Bag", "リュック": "Bag",
     "hairpin": "Hair Accessory", "hairclip": "Hair Accessory", "headband": "Hair Accessory",
     "髪飾り": "Hair Accessory", "ヘアピン": "Hair Accessory", "カチューシャ": "Hair Accessory",
-    "ribbon": "Ribbon", "リボン": "Ribbon", "bow": "Ribbon",
+    "ribbon": "Ribbon", "リボン": "Ribbon",
     "collar": "Collar", "カラー": "Collar", "首輪": "Collar",
 
     # ── Body Parts (sold separately) ──
@@ -211,16 +213,12 @@ WORD_TO_TAG: dict[str, str] = {
     "tail": "Tail", "尻尾": "Tail", "しっぽ": "Tail", "テール": "Tail",
     "ears": "Ears", "ear": "Ears", "耳": "Ears", "nekomimi": "Ears", "kemonomimi": "Ears", "ケモミミ": "Ears",
     "horns": "Horns", "horn": "Horns", "角": "Horns", "ツノ": "Horns",
-    "halo": "Halo", "光輪": "Halo", "天使の輪": "Halo",
     "fangs": "Fangs", "fang": "Fangs", "牙": "Fangs", "八重歯": "Fangs",
     "eyes": "Eyes", "eye": "Eyes", "目": "Eyes", "瞳": "Eyes", "アイ": "Eyes",
     "eyebrows": "Eyebrows", "eyebrow": "Eyebrows", "眉毛": "Eyebrows", "まゆげ": "Eyebrows",
     "eyelashes": "Eyelashes", "eyelash": "Eyelashes", "まつげ": "Eyelashes", "睫毛": "Eyelashes",
     "paws": "Paws", "paw": "Paws", "肉球": "Paws",
     "claws": "Claws", "claw": "Claws", "爪": "Claws",
-    "feathers": "Feathers", "feather": "Feathers",
-    "scales": "Scales", "scale": "Scales", "鱗": "Scales", "うろこ": "Scales",
-    "whiskers": "Whiskers", "whisker": "Whiskers", "ひげ": "Whiskers", "ヒゲ": "Whiskers",
     "piercings": "Piercings", "piercing": "Piercings",
     "chains": "Chains", "chain": "Chains", "チェーン": "Chains", "鎖": "Chains",
     "muscle": "Muscle", "muscles": "Muscle", "筋肉": "Muscle", "マッスル": "Muscle",
@@ -235,8 +233,6 @@ WORD_TO_TAG: dict[str, str] = {
     "cape": "Cape", "マント": "Cape", "cloak": "Cape",
     "scarf": "Scarf", "マフラー": "Scarf", "スカーフ": "Scarf",
     "belt": "Belt", "ベルト": "Belt",
-    "apron": "Apron", "エプロン": "Apron",
-    "tie": "Tie", "ネクタイ": "Tie",
 
     # ── Footwear / Legwear ──
     "shoes": "Shoes", "靴": "Shoes", "シューズ": "Shoes", "sneakers": "Shoes", "sneaker": "Shoes", "スニーカー": "Shoes",
@@ -249,7 +245,6 @@ WORD_TO_TAG: dict[str, str] = {
     "stockings": "Stockings", "ストッキング": "Stockings", "thighhigh": "Stockings", "ニーハイ": "Stockings",
     "tights": "Stockings", "タイツ": "Stockings",
     "gloves": "Gloves", "手袋": "Gloves", "グローブ": "Gloves",
-    "sleeves": "Sleeves", "袖": "Sleeves", "アームカバー": "Sleeves",
 
     # ── Hair ──
     "hair": "Hair", "髪": "Hair", "ヘアー": "Hair",
@@ -284,7 +279,10 @@ WORD_TO_TAG: dict[str, str] = {
     "idle": "Animation", "待機": "Animation",
     "locomotion": "Locomotion", "歩行": "Locomotion", "移動": "Locomotion",
 
-    # ── Species / Character Types ──
+    # ── Species / Character Types — core VRChat themes only ──
+    # (kemono/animal-ear themes are core; fantasy/period themes like
+    # samurai/ninja/knight/oni/vampire are too rare to auto-tag and were
+    # mostly producing wrong genre classifications.)
     "kemono": "Kemono", "ケモノ": "Kemono", "獣人": "Kemono",
     "furry": "Furry",
     "neko": "Neko", "猫": "Neko", "ネコ": "Neko",
@@ -292,33 +290,38 @@ WORD_TO_TAG: dict[str, str] = {
     "kitsune": "Fox", "fox": "Fox", "狐": "Fox", "キツネ": "Fox",
     "usagi": "Usagi", "うさぎ": "Usagi", "bunny": "Usagi", "ウサギ": "Usagi",
     "elf": "Elf", "エルフ": "Elf",
-    "oni": "Oni", "鬼": "Oni",
-    "demon": "Demon", "悪魔": "Demon", "デーモン": "Demon",
-    "angel": "Angel", "天使": "Angel",
-    "vampire": "Vampire", "吸血鬼": "Vampire", "ヴァンパイア": "Vampire",
-    "succubus": "Succubus", "サキュバス": "Succubus",
-    "robot": "Robot", "ロボット": "Robot", "ロボ": "Robot", "mecha": "Robot", "メカ": "Robot",
     "doll": "Doll", "人形": "Doll", "ドール": "Doll",
-    "witch": "Witch", "魔女": "Witch",
     "miko": "Miko", "巫女": "Miko",
-    "nurse": "Nurse", "ナース": "Nurse", "看護師": "Nurse",
-    "knight": "Knight", "騎士": "Knight",
-    "ninja": "Ninja", "忍者": "Ninja",
-    "samurai": "Samurai", "侍": "Samurai",
     "bunnysuit": "Bunny Suit", "バニー": "Bunny Suit",
 
     # ── VRChat Technical ──
     "avatar": "Avatar Base", "アバター": "Avatar Base", "素体": "Avatar Base",
+    "vroid": "VRoid",
     "prefab": "Prefab", "プレハブ": "Prefab",
     "gimmick": "Gimmick", "ギミック": "Gimmick",
     "facetracking": "Face Tracking", "facetrack": "Face Tracking", "ft": "Face Tracking",
     "フェイストラッキング": "Face Tracking", "フェイスト": "Face Tracking",
     "physbone": "PhysBone", "physbones": "PhysBone", "フィズボーン": "PhysBone", "揺れ物": "PhysBone",
     "mmd": "MMD", "ミクミク": "MMD",
-    "quest": "Quest", "クエスト": "Quest",
+    "quest": "Quest", "クエスト": "Quest", "quest対応": "Quest",
     "pconly": "PC", "PC専用": "PC",
     "addon": "Add-on", "追加": "Add-on", "拡張": "Add-on",
+    "改変": "Modification",
     "nsfw": "NSFW", "r18": "NSFW", "r-18": "NSFW",
+    # Penetration shader systems — VRChat NSFW context
+    "dps": "NSFW", "tps": "NSFW", "sps": "NSFW",
+    # Modern VRChat tooling — universally referenced in modern asset bundles
+    "vrcfury": "VRCFury", "vrcf": "VRCFury",
+    "modularavatar": "Modular Avatar", "modular": "Modular Avatar",
+    "toggle": "Toggle", "トグル": "Toggle", "toggles": "Toggle",
+    "blendshape": "BlendShape", "blendshapes": "BlendShape",
+    "ブレンドシェイプ": "BlendShape", "シェイプキー": "BlendShape",
+    # Common shader names
+    "liltoon": "lilToon",
+    "poiyomi": "Poiyomi",
+    # Discovery / aesthetic attributes
+    "kawaii": "Cute", "かわいい": "Cute", "cute": "Cute", "可愛い": "Cute",
+    "mascot": "Mascot", "マスコット": "Mascot",
 }
 
 # ── Canonical genre names (single source of truth) ──

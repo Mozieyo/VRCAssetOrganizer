@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 CREATE_STATEMENTS = [
     """
@@ -79,14 +79,6 @@ CREATE_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER PRIMARY KEY,
         applied_at REAL DEFAULT (strftime('%s', 'now'))
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS cover_labels (
-        asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-        image_name TEXT NOT NULL,
-        chosen_at  REAL DEFAULT (strftime('%s', 'now')),
-        PRIMARY KEY (asset_id, image_name)
     )
     """,
     """
@@ -200,38 +192,26 @@ def init_schema(conn: sqlite3.Connection):
                    SELECT asset_id, image_name FROM cover_labels"""
             )
 
-        # Migration: v7 → v8 — remove timing columns (not useful for ML)
-        if current == 7:
-            conn.execute("DROP TABLE IF EXISTS cover_labels_v2")
-            conn.execute("DROP TABLE IF EXISTS tag_labels")
-            conn.execute(
-                """CREATE TABLE cover_labels_v2 (
-                    asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
-                    image_name TEXT NOT NULL,
-                    image_width INTEGER,
-                    image_height INTEGER,
-                    archive_depth INTEGER,
-                    filename_score INTEGER,
-                    images_shown INTEGER,
-                    chosen_at REAL DEFAULT (strftime('%s', 'now'))
-                )"""
-            )
-            conn.execute(
-                """CREATE TABLE tag_labels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-                    session_id TEXT NOT NULL,
-                    original_tags TEXT,
-                    accepted_tags TEXT,
-                    rejected_tags TEXT,
-                    added_tags TEXT,
-                    genre_tag_id INTEGER REFERENCES tags(id),
-                    labeled_at REAL DEFAULT (strftime('%s', 'now')),
-                    UNIQUE(asset_id, session_id)
-                )"""
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_asset ON tag_labels(asset_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_tag_labels_session ON tag_labels(session_id)")
+        # Migration: v7 → v8 — formerly dropped+recreated cover_labels_v2 and
+        # tag_labels to "remove timing columns", but the new schemas were
+        # identical to v7 so the only effect was data loss. The block has been
+        # removed; v8 is functionally identical to v7 and v8→v9 recovers any
+        # labels that survived in the legacy `cover_labels` table.
+
+        # Migration: v8 → v9 — collapse to a single cover label table.
+        # Backfills `cover_labels_v2` from the legacy `cover_labels` (recovering
+        # rows that were destroyed by the old v7→v8 bug), then drops the legacy
+        # table so save/get/reset paths only ever touch one table.
+        if current < 9:
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO cover_labels_v2 (asset_id, image_name)
+                       SELECT asset_id, image_name FROM cover_labels"""
+                )
+                conn.execute("DROP TABLE cover_labels")
+            except sqlite3.OperationalError:
+                # legacy table doesn't exist on this install — nothing to migrate
+                pass
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",

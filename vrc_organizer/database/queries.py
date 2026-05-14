@@ -93,8 +93,7 @@ class Queries:
         with self._db.write_connection() as conn:
             cur = conn.execute(
                 "UPDATE assets SET thumb_state = 'pending', thumbnail = NULL "
-                "WHERE (id IN (SELECT asset_id FROM cover_labels_v2) "
-                "   OR id IN (SELECT asset_id FROM cover_labels)) "
+                "WHERE id IN (SELECT asset_id FROM cover_labels_v2) "
                 "AND thumb_state IN ('ready', 'error') "
                 "AND trash_date IS NULL"
             )
@@ -476,11 +475,6 @@ class Queries:
             row = conn.execute(
                 "SELECT image_name FROM cover_labels_v2 WHERE asset_id = ?", (asset_id,)
             ).fetchone()
-            if row:
-                return row[0]
-            row = conn.execute(
-                "SELECT image_name FROM cover_labels WHERE asset_id = ?", (asset_id,)
-            ).fetchone()
             return row[0] if row else None
 
     def save_cover_label_v2(
@@ -498,10 +492,6 @@ class Queries:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (asset_id, image_name, image_width, image_height,
                  archive_depth, filename_score, images_shown)
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO cover_labels (asset_id, image_name) VALUES (?, ?)",
-                (asset_id, image_name)
             )
             conn.commit()
 
@@ -563,7 +553,7 @@ class Queries:
         with self._db.connection() as conn:
             cover_rows = conn.execute(
                 """SELECT a.filename, cl.image_name
-                   FROM cover_labels cl JOIN assets a ON a.id = cl.asset_id
+                   FROM cover_labels_v2 cl JOIN assets a ON a.id = cl.asset_id
                    WHERE a.trash_date IS NULL"""
             ).fetchall()
             review_rows = conn.execute(
@@ -603,7 +593,7 @@ class Queries:
                     skipped += 1
                     continue
                 conn.execute(
-                    "INSERT OR IGNORE INTO cover_labels (asset_id, image_name) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO cover_labels_v2 (asset_id, image_name) VALUES (?, ?)",
                     (asset_id, entry["image_name"])
                 )
                 imported += 1

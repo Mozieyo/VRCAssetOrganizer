@@ -190,16 +190,30 @@ class Sidebar(QWidget):
         self._emit_filters()
 
     def refresh(self):
-        # Preserve checked state across rebuild — chips are recreated so we
-        # must keep the id sets that track what the user has selected.
-        saved_and_ids = list(self._and_ids)
+        # Refresh chips after a tag-state change (import, add, remove, rename,
+        # delete). Selection state is held in id sets, not in the chips
+        # themselves, so we drop any IDs that no longer reference live tags
+        # and let the rebuild restore active state from the cleaned set.
+        valid_tag_ids = {tid for tid, _, _, _ in self._queries.get_all_tags()}
+        pre_and = set(self._and_ids)
+        pre_avatar = set(self._avatar_ids)
+        pre_genre = set(self._genre_ids)
+        self._avatar_ids = self._avatar_ids & valid_tag_ids
+        self._genre_ids = self._genre_ids & valid_tag_ids
+        self._and_ids = [tid for tid in self._and_ids if tid in valid_tag_ids]
+
         self._rebuild_tag_chips()
         self._rebuild_avatar_chips()
-        # Restore AND-filter chip state from before the rebuild
-        for tag_id, chip in self._tag_chips.items():
-            if tag_id in saved_and_ids:
-                chip.set_active(True)
-        self._emit_filters()
+
+        # Re-emit filters only if the active set actually changed (e.g. a
+        # filtered-on tag was deleted). The common case — counts changed but
+        # selection unchanged — must NOT re-emit, because the caller will
+        # have already refreshed the model and a redundant emit triggers a
+        # second model.refresh() through tag_filter_changed → _apply_filters.
+        if (pre_and != set(self._and_ids)
+                or pre_avatar != self._avatar_ids
+                or pre_genre != self._genre_ids):
+            self._emit_filters()
 
     def _rebuild_avatar_chips(self):
         while self._avatar_flow.count():
@@ -222,7 +236,10 @@ class Sidebar(QWidget):
             if name not in avatar_counts:
                 continue
             tag_id, count = avatar_counts[name]
-            if count == 0:
+            # Skip zero-count avatars UNLESS one is currently in the active
+            # filter set — otherwise the user gets a phantom filter
+            # (grid shows empty results because of an invisible chip).
+            if count == 0 and tag_id not in self._avatar_ids:
                 continue
             chip = ChipToggleButton(f"{name} ({count})")
             chip.toggled.connect(lambda checked, n=name: self._on_avatar_chip_toggled(n, checked))

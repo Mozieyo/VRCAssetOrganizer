@@ -17,8 +17,25 @@ def suggest_tags(
     filename: str,
     extracted_path: Path | None = None,
 ) -> list[int]:
-    """Return tag IDs to auto-assign based on filename and folder contents."""
+    """Return tag IDs to auto-assign based on filename and folder contents.
+
+    Matching strategy is recall-leaning but guarded against the classic
+    short-key substring FP cascade:
+      1. Direct token match (any key length) — high confidence.
+      2. Substring match — only for word_keys of length >= 5, and only the
+         `word_key in token` direction (e.g. "hair" in "hairstyle"). The
+         previous version used a 3-char floor and both directions, which
+         caused "ear" to match "heart", "cap" to match "captain", etc.
+      3. Multi-word phrase scan on the normalized string for 4+ char keys
+         (catches "long hair", "facetracking", "school uniform").
+      4. Avatar + JP avatar matching unchanged.
+      5. Hierarchy parent promotion fires ONLY for high-confidence
+         detections (direct token / phrase / avatar match). Substring-only
+         matches don't promote parents — that's where the worst cascading
+         FPs were coming from.
+    """
     suggested_names: set[str] = set()
+    confident_names: set[str] = set()
 
     # Collect text sources
     sources = [filename]
@@ -31,47 +48,59 @@ def suggest_tags(
         except OSError:
             pass
 
-    # Tokenize and match
     for source in sources:
         tokens = _tokenize(source)
         normalized = source.lower()
+        normalized_spaces = normalized.replace("_", " ").replace("-", " ").replace(",", " ")
 
-        # Match against WORD_TO_TAG dictionary (substring and token matching)
+        # 1. Direct token match — high confidence
         for token in tokens:
-            # Direct match
-            if token in WORD_TO_TAG:
-                suggested_names.add(WORD_TO_TAG[token])
-            # Substring match — check if token contains a known word
+            tag = WORD_TO_TAG.get(token)
+            if tag is not None:
+                suggested_names.add(tag)
+                confident_names.add(tag)
+
+        # 2. Substring match — single direction, 5+ char key floor
+        # (eliminates the short-key FP cascade — "ear" no longer matches
+        # "heart", "cap" no longer matches "captain", etc.)
+        for token in tokens:
             for word_key, tag_name in WORD_TO_TAG.items():
-                if len(word_key) >= 3 and (word_key in token or token in word_key):
+                if len(word_key) >= 5 and word_key != token and word_key in token:
                     suggested_names.add(tag_name)
 
-        # Also check the full normalized string for multi-word matches
-        normalized_spaces = normalized.replace("_", " ").replace("-", " ").replace(",", " ")
+        # 3. Multi-word phrase scan on the full normalized string
         for word_key, tag_name in WORD_TO_TAG.items():
             if len(word_key) >= 4 and word_key in normalized_spaces:
                 suggested_names.add(tag_name)
+                confident_names.add(tag_name)
 
-        # Avatar name matching (popularity-ranked list, English + Japanese)
+        # 4. Avatar name matching (popularity-ranked list, English + Japanese)
         for avatar in TOP_AVATARS:
             avatar_lower = avatar.lower()
             if avatar_lower in normalized_spaces or avatar_lower in normalized:
                 suggested_names.add(avatar)
+                confident_names.add(avatar)
             for token in tokens:
                 if len(token) >= 3 and token == avatar_lower:
                     suggested_names.add(avatar)
+                    confident_names.add(avatar)
 
         # Japanese avatar name → English canonical tag
         for jp_name, en_tag in JP_AVATAR_TO_EN.items():
             if jp_name in normalized or jp_name in normalized_spaces:
                 suggested_names.add(en_tag)
+                confident_names.add(en_tag)
             for token in tokens:
                 if len(token) >= 2 and (token == jp_name or jp_name in token):
                     suggested_names.add(en_tag)
+                    confident_names.add(en_tag)
 
-    # Apply hierarchy: if a child tag is detected, add its parent
+    # 5. Apply hierarchy parent promotion — only for confident detections.
+    # A substring-only match (e.g. "wears" producing "Wear" via "wear" in
+    # "wears") will NOT auto-promote to "Outfit" or any other parent. This
+    # stops one wrong fuzzy match from snowballing into 2-3 wrong tags.
     hierarchy_additions: set[str] = set()
-    for tag_name in suggested_names.copy():
+    for tag_name in confident_names:
         for parent, children in TAG_HIERARCHY.items():
             if tag_name in children:
                 hierarchy_additions.add(parent)
@@ -124,28 +153,31 @@ GENRE_KEYWORDS: dict[str, list[str]] = {
 }
 
 OUTFIT_ACCE_TAGS = {
-    # Clothing
+    # Clothing — core VRChat outfit categories
     "Outfit", "Dress", "Skirt", "Pants", "Shorts", "Shirt",
-    "Jacket", "Sweater", "Hoodie", "Vest", "Coat", "Tank Top",
-    "Crop Top", "Suit", "Gothic", "Lolita", "Cyberpunk", "Fantasy",
-    "Idol Outfit", "Kimono", "Yukata", "Swimsuit", "Lingerie",
+    "Jacket", "Sweater", "Hoodie", "Vest", "Coat", "Tops",
+    "Bodysuit", "Corset", "Jumpsuit",
+    "Suit", "Gothic", "Lolita", "Cyberpunk", "Fantasy", "Idol Outfit",
+    "Kimono", "Yukata", "Swimsuit", "Lingerie",
     "Pajamas", "Sportswear", "Maid", "School Uniform", "Military Uniform",
+    "Wedding", "Bunny Suit", "Casual",
     # Footwear / Legwear
-    "Shoes", "Heels", "Boots", "Socks", "Stockings", "Gloves",
+    "Shoes", "Heels", "Boots", "Sandals", "Socks", "Stockings", "Gloves",
     # Accessories
     "Accessory", "Hat", "Glasses", "Mask", "Necklace", "Choker",
-    "Earrings", "Bracelet", "Ring", "Bag", "Backpack",
-    "Hair Accessory", "Ribbon", "Bow", "Collar", "Cape", "Scarf",
-    "Belt", "Tie", "Watch", "Umbrella", "Crown", "Flower",
-    "Wings", "Tail", "Ears", "Horns", "Halo",
-    "Weapon", "Shield", "Prop", "Pet",
+    "Earrings", "Bracelet", "Ring", "Bag",
+    "Hair Accessory", "Ribbon", "Collar", "Cape", "Scarf", "Belt",
+    "Wings", "Tail", "Ears", "Horns",
+    "Weapon", "Shield", "Prop",
     # Hair
     "Hair", "Hairstyle", "Bangs", "Ponytail", "Twin Tails",
-    "Bob Cut", "Long Hair", "Short Hair", "Braids", "Drill Hair", "Ahoge",
+    "Bob Cut", "Long Hair", "Short Hair", "Braids", "Ahoge",
     # Body mods
     "Makeup", "Tattoo", "Chibi",
-    # Texture
+    # Texture / Material
     "Texture", "Material",
+    # Decoration attribute
+    "Cute",
 }
 
 
