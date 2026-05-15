@@ -11,31 +11,38 @@ from vrc_organizer.tag_data import ALL_AVATAR_NAMES, GENRE_NAMES, TOP_AVATARS
 from vrc_organizer.ui.body_map import BodyMapWidget
 from vrc_organizer.ui.chip_button import ChipToggleButton
 from vrc_organizer.ui.flow_layout import FlowLayout
-from vrc_organizer.ui.inspector import AddTagChip
-
-
-_COLLAPSED_STYLE = (
-    "QPushButton { background: transparent; color: #64748b; border: none; "
-    "padding: 4px 0; font-size: 12px; font-weight: bold; text-align: left; }"
-    "QPushButton:hover { color: #334155; }"
-)
 
 
 class CollapsibleSection(QWidget):
     """Clickable header that hides/shows its content."""
 
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, parent=None, *, start_collapsed: bool = False):
         super().__init__(parent)
-        self._header = QPushButton(f"  {title}")
+        self._title = title
+        arrow = "▸" if start_collapsed else "▾"
+        self._header = QPushButton(f"{arrow}  {title}")
         self._header.setFlat(True)
         self._header.setCursor(Qt.PointingHandCursor)
-        self._header.setStyleSheet(_COLLAPSED_STYLE)
+        self._header.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #64748b;
+                border: none;
+                padding: 8px 0;
+                font-size: 11px;
+                font-weight: 600;
+                text-align: left;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover { color: #94a3b8; }
+        """)
         self._header.clicked.connect(self._toggle)
 
         self._content = QWidget()
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(4, 0, 4, 4)
-        self._content_layout.setSpacing(4)
+        self._content_layout.setContentsMargins(0, 0, 0, 8)
+        self._content_layout.setSpacing(6)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -43,7 +50,8 @@ class CollapsibleSection(QWidget):
         layout.addWidget(self._header)
         layout.addWidget(self._content)
 
-        self._collapsed = False
+        self._collapsed = start_collapsed
+        self._content.setVisible(not start_collapsed)
 
     def content_layout(self) -> QVBoxLayout:
         return self._content_layout
@@ -51,8 +59,8 @@ class CollapsibleSection(QWidget):
     def _toggle(self):
         self._collapsed = not self._collapsed
         self._content.setVisible(not self._collapsed)
-        arrow = "  " if self._collapsed else "  "
-        self._header.setText(f"{arrow}{self._header.text()[2:]}")
+        arrow = "▸" if self._collapsed else "▾"
+        self._header.setText(f"{arrow}  {self._title}")
 
 
 class Sidebar(QWidget):
@@ -77,7 +85,7 @@ class Sidebar(QWidget):
         layout.setSpacing(8)
 
         # ── Body Map (collapsible) ──
-        body_section = CollapsibleSection("Body Map")
+        body_section = CollapsibleSection("Body Map", start_collapsed=True)
         self._body_map = BodyMapWidget()
         self._body_map.segment_toggled.connect(self._on_body_segment_toggled)
         body_section.content_layout().addWidget(self._body_map, alignment=Qt.AlignCenter)
@@ -99,11 +107,13 @@ class Sidebar(QWidget):
         layout.addWidget(genre_section)
         layout.addWidget(_sep())
 
-        # ── Avatars (collapsible, chip grid with search) ──
+        # ── Avatars (collapsible, chip grid with search-and-add) ──
         avatar_section = CollapsibleSection("Avatars")
         self._avatar_search = QLineEdit()
-        self._avatar_search.setPlaceholderText("Search avatars...")
+        self._avatar_search.setPlaceholderText("Search or add avatar")
+        self._avatar_search.setFixedHeight(24)
         self._avatar_search.textChanged.connect(self._on_avatar_search)
+        self._avatar_search.returnPressed.connect(self._on_avatar_search_submit)
         avatar_section.content_layout().addWidget(self._avatar_search)
 
         avatar_scroll = QScrollArea()
@@ -119,11 +129,17 @@ class Sidebar(QWidget):
         layout.addWidget(avatar_section)
         layout.addWidget(_sep())
 
-        # ── Tags (scrollable AND-filter chips) ──
+        # ── Tags (search-and-add, AND-filter chips) ──
         tag_header = QWidget()
         tag_layout = QVBoxLayout(tag_header)
         tag_layout.setContentsMargins(0, 0, 0, 0)
         tag_layout.addWidget(QLabel("Tags"))
+        self._tag_search = QLineEdit()
+        self._tag_search.setPlaceholderText("Search or add tag")
+        self._tag_search.setFixedHeight(24)
+        self._tag_search.textChanged.connect(self._on_tag_search)
+        self._tag_search.returnPressed.connect(self._on_tag_search_submit)
+        tag_layout.addWidget(self._tag_search)
         tag_scroll = QScrollArea()
         tag_scroll.setWidgetResizable(True)
         tag_scroll.setMaximumHeight(300)
@@ -139,7 +155,7 @@ class Sidebar(QWidget):
         clear_btn.clicked.connect(self._on_clear_filters)
         tag_layout.addWidget(clear_btn)
 
-        manage_btn = QPushButton("+ Manage Tags")
+        manage_btn = QPushButton("Manage Tags")
         manage_btn.clicked.connect(self.manage_tags.emit)
         tag_layout.addWidget(manage_btn)
         layout.addWidget(tag_header)
@@ -148,22 +164,55 @@ class Sidebar(QWidget):
 
     # ── Tag chips rebuild ──
 
+    # Hard cap on how many tag chips we render at once. The training crawler
+    # can mint thousands of low-signal tags; cramming them all into one flow
+    # layout silently collapses the panel and the user sees nothing. Default
+    # behaviour: show tags actually in use; the search field surfaces the rest.
+    _MAX_TAG_CHIPS = 200
+
     def _rebuild_tag_chips(self):
         while self._tag_chips_layout.count():
             item = self._tag_chips_layout.takeAt(0)
             w = item.widget() if item else None
-            if w and not isinstance(w, AddTagChip):
+            if w:
                 w.hide()
                 w.deleteLater()
         self._tag_chips.clear()
         self._tag_cache.clear()
 
-        selected_chips = []
-        unselected_chips = []
-        for tag_id, name, color, count in self._queries.get_all_tags():
+        query = self._tag_search.text().lower().strip() if hasattr(self, "_tag_search") else ""
+
+        all_tags = self._queries.get_all_tags()
+        # Cache every tag id by name so the AND-filter logic still works even
+        # though we don't render a chip for each one.
+        for tag_id, name, _color, _count in all_tags:
             self._tag_cache[name] = tag_id
+
+        # With a search query: filter by substring across the full tag list.
+        # Without a query: show only tags that are currently assigned to at
+        # least one asset (+ anything in the active AND-filter set so its
+        # chip stays visible while toggled on).
+        candidates: list[tuple[int, str, int]] = []
+        for tag_id, name, _color, count in all_tags:
             if name in GENRE_NAMES or name in ALL_AVATAR_NAMES:
                 continue
+            if query:
+                if query not in name.lower():
+                    continue
+            else:
+                if count <= 0 and tag_id not in self._and_ids:
+                    continue
+            candidates.append((tag_id, name, count))
+
+        # Selected first, then by usage count (most-used surface first).
+        candidates.sort(key=lambda r: (
+            0 if r[0] in self._and_ids else 1, -r[2], r[1].lower(),
+        ))
+
+        hidden_count = max(0, len(candidates) - self._MAX_TAG_CHIPS)
+        candidates = candidates[: self._MAX_TAG_CHIPS]
+
+        for tag_id, name, count in candidates:
             chip = ChipToggleButton(f"{name} ({count})")
             chip.setProperty("tag_id", tag_id)
             chip.toggled.connect(
@@ -172,19 +221,14 @@ class Sidebar(QWidget):
             self._tag_chips[tag_id] = chip
             if tag_id in self._and_ids:
                 chip.set_active(True)
-                selected_chips.append(chip)
-            else:
-                unselected_chips.append(chip)
+            self._tag_chips_layout.addWidget(chip)
 
-        # Rebuild: selected → '+' → unselected
-        for chip in selected_chips:
-            self._tag_chips_layout.addWidget(chip)
-        if not hasattr(self, '_tag_add_chip'):
-            self._tag_add_chip = AddTagChip()
-            self._tag_add_chip.tag_created.connect(self._on_sidebar_add_tag)
-        self._tag_chips_layout.addWidget(self._tag_add_chip)
-        for chip in unselected_chips:
-            self._tag_chips_layout.addWidget(chip)
+        # Footer hint when the list was trimmed — keeps the user from
+        # thinking the panel is broken when the crawler leaves 2000 tags.
+        if hidden_count > 0:
+            hint = QLabel(f"+ {hidden_count} more — type to search")
+            hint.setStyleSheet("color: palette(mid); font-size: 10px; padding: 4px;")
+            self._tag_chips_layout.addWidget(hint)
 
     def _on_tag_chip_toggled(self, tag_id: int, checked: bool):
         self._emit_filters()
@@ -215,51 +259,57 @@ class Sidebar(QWidget):
                 or pre_genre != self._genre_ids):
             self._emit_filters()
 
+    _MAX_AVATAR_CHIPS = 120
+
     def _rebuild_avatar_chips(self):
         while self._avatar_flow.count():
             item = self._avatar_flow.takeAt(0)
             w = item.widget() if item else None
-            if w and not isinstance(w, AddTagChip):
+            if w:
                 w.hide()
                 w.deleteLater()
         self._avatar_chips.clear()
 
-        avatar_counts: dict[str, tuple[int, int]] = {}  # name → (tag_id, count)
-        for tag_id, name, color, count in self._queries.get_all_tags():
-            if name in ALL_AVATAR_NAMES:
-                avatar_counts[name] = (tag_id, count)
-                self._tag_cache[name] = tag_id
+        query = self._avatar_search.text().lower().strip() if hasattr(self, "_avatar_search") else ""
 
-        selected_chips = []
-        unselected_chips = []
-        for name in TOP_AVATARS:
-            if name not in avatar_counts:
+        # Every tag whose name is in the avatar ontology counts as an avatar.
+        avatar_rows: list[tuple[int, str, int]] = []
+        for tag_id, name, _color, count in self._queries.get_all_tags():
+            self._tag_cache[name] = tag_id
+            if name not in ALL_AVATAR_NAMES:
                 continue
-            tag_id, count = avatar_counts[name]
-            # Skip zero-count avatars UNLESS one is currently in the active
-            # filter set — otherwise the user gets a phantom filter
-            # (grid shows empty results because of an invisible chip).
-            if count == 0 and tag_id not in self._avatar_ids:
-                continue
+            if query:
+                if query not in name.lower():
+                    continue
+            else:
+                # No query: only show avatars actually in use or already
+                # picked as a filter. Without this guard, a long-tail
+                # ontology of 200+ avatar names crashes the layout.
+                if count <= 0 and tag_id not in self._avatar_ids:
+                    continue
+            avatar_rows.append((tag_id, name, count))
+
+        order = {n: i for i, n in enumerate(TOP_AVATARS)}
+        avatar_rows.sort(key=lambda r: (
+            0 if r[0] in self._avatar_ids else 1,
+            -r[2], order.get(r[1], 999), r[1].lower(),
+        ))
+
+        hidden = max(0, len(avatar_rows) - self._MAX_AVATAR_CHIPS)
+        avatar_rows = avatar_rows[: self._MAX_AVATAR_CHIPS]
+
+        for tag_id, name, count in avatar_rows:
             chip = ChipToggleButton(f"{name} ({count})")
             chip.toggled.connect(lambda checked, n=name: self._on_avatar_chip_toggled(n, checked))
             self._avatar_chips[name] = chip
-            # Restore checked state if this avatar is in the active filter
             if tag_id in self._avatar_ids:
                 chip.set_active(True)
-                selected_chips.append(chip)
-            else:
-                unselected_chips.append(chip)
+            self._avatar_flow.addWidget(chip)
 
-        # Rebuild: selected → '+' → unselected
-        for chip in selected_chips:
-            self._avatar_flow.addWidget(chip)
-        if not hasattr(self, '_avatar_add_chip'):
-            self._avatar_add_chip = AddTagChip()
-            self._avatar_add_chip.tag_created.connect(self._on_sidebar_add_avatar)
-        self._avatar_flow.addWidget(self._avatar_add_chip)
-        for chip in unselected_chips:
-            self._avatar_flow.addWidget(chip)
+        if hidden > 0:
+            hint = QLabel(f"+ {hidden} more — type to search")
+            hint.setStyleSheet("color: palette(mid); font-size: 10px; padding: 4px;")
+            self._avatar_flow.addWidget(hint)
 
     # ── Genre (mutually exclusive via ChipToggleButton exclusive_group) ──
 
@@ -314,6 +364,25 @@ class Sidebar(QWidget):
         for name, chip in self._avatar_chips.items():
             chip.setVisible(query in name.lower() if query else True)
 
+    def _on_avatar_search_submit(self):
+        """Press Enter on the avatar search — create a new avatar tag."""
+        text = self._avatar_search.text().strip()
+        if not text:
+            return
+        self._on_sidebar_add_avatar(text)
+        self._avatar_search.clear()
+
+    def _on_tag_search(self, _text: str):
+        self._rebuild_tag_chips()
+
+    def _on_tag_search_submit(self):
+        """Press Enter on the tag search — create the tag if missing."""
+        text = self._tag_search.text().strip()
+        if not text:
+            return
+        self._on_sidebar_add_tag(text)
+        self._tag_search.clear()
+
     # ── Clear ──
 
     def _on_clear_filters(self):
@@ -364,5 +433,5 @@ class Sidebar(QWidget):
 def _sep() -> QWidget:
     w = QWidget()
     w.setFixedHeight(1)
-    w.setStyleSheet("background: #e2e8f0;")
+    w.setStyleSheet("background: #334155;")
     return w

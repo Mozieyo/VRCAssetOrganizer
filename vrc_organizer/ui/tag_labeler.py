@@ -1,143 +1,26 @@
-"""Tag Labeler — captcha-style UI for reviewing and correcting auto-assigned tags."""
+"""Tag Labeler — fast captcha-style UI for reviewing auto-assigned tags."""
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QPixmap, QFont, QKeyEvent
+from PySide6.QtGui import QPixmap, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QWidget, QProgressBar, QFrame, QMessageBox,
-    QLineEdit, QListWidget, QListWidgetItem,
+    QWidget, QFrame, QMessageBox, QLineEdit, QScrollArea,
 )
 
 from vrc_organizer.database.queries import Queries
 from vrc_organizer.models.asset import Asset
 from vrc_organizer.tag_data import GENRE_NAMES, TAG_HIERARCHY
-from vrc_organizer.ui.flow_layout import FlowLayout
 from vrc_organizer.auto_tagger import suggest_tags
 
-THUMB_SIZE = 140
-
-
-class _TagChip(QPushButton):
-    """Tag chip that toggles between active/inactive states."""
-    def __init__(self, tag_id: int, name: str, active: bool = True, suggested: bool = False, parent=None):
-        super().__init__(name, parent)
-        self.tag_id = tag_id
-        self.tag_name = name
-        self._suggested = suggested
-        self.setCheckable(True)
-        self.setChecked(active)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(28)
-        self._apply_style()
-        self.toggled.connect(self._apply_style)
-
-    def _apply_style(self):
-        if self._suggested and not self.isChecked():
-            self.setStyleSheet("""
-                QPushButton {
-                    background: transparent; color: #94a3b8;
-                    border: 1px dashed #cbd5e1; border-radius: 14px;
-                    padding: 4px 14px; font-size: 12px;
-                }
-                QPushButton:hover { background: #dbeafe; border-color: #3b82f6; color: #1e40af; }
-            """)
-        elif self.isChecked():
-            self.setStyleSheet("""
-                QPushButton {
-                    background: #3b82f6; color: white; border: none;
-                    border-radius: 14px; padding: 4px 14px; font-size: 12px;
-                }
-                QPushButton:hover { background: #2563eb; }
-            """)
-        else:
-            self.setStyleSheet("""
-                QPushButton {
-                    background: #fee2e2; color: #dc2626; border: none;
-                    border-radius: 14px; padding: 4px 14px; font-size: 12px;
-                    text-decoration: line-through;
-                }
-                QPushButton:hover { background: #fecaca; }
-            """)
-
-
-class _GenreButton(QPushButton):
-    """Exclusive genre selection button."""
-    def __init__(self, name: str, parent=None):
-        super().__init__(name, parent)
-        self.setCheckable(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(32)
-        self._apply_style()
-        self.toggled.connect(self._apply_style)
-
-    def _apply_style(self):
-        if self.isChecked():
-            self.setStyleSheet("""
-                QPushButton {
-                    background: #22c55e; color: white; border: none;
-                    border-radius: 16px; padding: 6px 16px; font-size: 12px; font-weight: 600;
-                }
-            """)
-        else:
-            self.setStyleSheet("""
-                QPushButton {
-                    background: #f1f5f9; color: #64748b; border: none;
-                    border-radius: 16px; padding: 6px 16px; font-size: 12px;
-                }
-                QPushButton:hover { background: #e2e8f0; color: #334155; }
-            """)
-
-
-class _SearchPopup(QFrame):
-    """Popup for searching and adding tags."""
-    tag_selected = Signal(int, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedWidth(220)
-        self.setMaximumHeight(180)
-        self.setStyleSheet("QFrame { background: white; border: 1px solid #e2e8f0; border-radius: 8px; }")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        self._list = QListWidget()
-        self._list.setFocusPolicy(Qt.NoFocus)
-        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._list.setStyleSheet("""
-            QListWidget { border: none; background: transparent; }
-            QListWidget::item { padding: 6px 8px; border-radius: 4px; }
-            QListWidget::item:hover { background: #f1f5f9; }
-            QListWidget::item:selected { background: #dbeafe; color: #1e40af; }
-        """)
-        self._list.itemClicked.connect(self._on_click)
-        layout.addWidget(self._list)
-
-    def set_results(self, results: list[tuple[int, str, str, int]]):
-        self._list.clear()
-        if not results:
-            self.hide()
-            return
-        for tid, name, color, count in results:
-            item = QListWidgetItem(name)
-            item.setData(Qt.UserRole, tid)
-            item.setData(Qt.UserRole + 1, name)
-            self._list.addItem(item)
-        self._list.setFixedHeight(min(160, self._list.sizeHintForRow(0) * len(results) + 8))
-        self.adjustSize()
-
-    def _on_click(self, item: QListWidgetItem):
-        self.hide()
-        self.tag_selected.emit(item.data(Qt.UserRole), item.data(Qt.UserRole + 1))
+THUMB_SIZE = 120
 
 
 class TagLabelerDialog(QDialog):
-    """Captcha-style dialog for reviewing and correcting auto-assigned tags."""
+    """Fast tag review dialog. Space = save, S = skip, 1-4 = genre, click tags to toggle."""
     labeling_complete = Signal()
 
     def __init__(self, queries: Queries, thumb_cache_dir: Path, parent=None):
@@ -145,459 +28,551 @@ class TagLabelerDialog(QDialog):
         self._queries = queries
         self._thumb_cache_dir = thumb_cache_dir
         self._assets: list[Asset] = []
-        self._current_idx = 0
-        self._session_id = str(uuid.uuid4())[:8]
-        self._loading_more = False
-        self._original_tags: list[int] = []
-        self._genre_buttons: dict[str, _GenreButton] = {}
-        self._tag_chips: list[_TagChip] = []
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(200)
-        self._search_timer.timeout.connect(self._do_search)
+        self._idx = 0
+        self._session = str(uuid.uuid4())[:8]
+        self._orig_tags: set[int] = set()
+        self._orig_genre: int | None = None
+        self._labeled = 0
+        self._chips: list[tuple[QWidget, int, str]] = []  # (widget, tag_id, state)
 
-        self.setWindowTitle("Label Tags")
-        self.resize(640, 520)
-        self._setup_ui()
-        self._load_assets()
+        self.setWindowTitle("Tag Review")
+        self.setMinimumSize(700, 500)
+        self._build_ui()
+        self._load_queue()
 
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 16, 20, 16)
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(16, 12, 16, 12)
 
-        # Header
-        header = QHBoxLayout()
-        self._title = QLabel("Loading...")
-        font = QFont()
-        font.setPointSize(13)
-        font.setBold(True)
-        self._title.setFont(font)
-        header.addWidget(self._title)
-        header.addStretch()
+        # Top bar: progress + hints
+        top = QHBoxLayout()
+        self._progress_lbl = QLabel("Loading...")
+        self._progress_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+        top.addWidget(self._progress_lbl)
+        top.addStretch()
+        hints = QLabel("Space = save & next   ·   S = skip   ·   Esc = done")
+        hints.setStyleSheet("color: #475569; font-size: 11px;")
+        top.addWidget(hints)
+        root.addLayout(top)
 
-        self._progress = QProgressBar()
-        self._progress.setFixedWidth(120)
-        self._progress.setTextVisible(False)
-        self._progress.setStyleSheet("""
-            QProgressBar { background: #e2e8f0; border-radius: 4px; height: 8px; }
-            QProgressBar::chunk { background: #3b82f6; border-radius: 4px; }
-        """)
-        header.addWidget(self._progress)
-        layout.addLayout(header)
+        # Main area
+        main = QHBoxLayout()
+        main.setSpacing(16)
 
-        # Main content: left (thumb) | right (tags)
-        content = QHBoxLayout()
-        content.setSpacing(20)
-
-        # Left: thumbnail + filename
+        # Left: thumbnail + filename + asset context (folders / readme)
         left = QVBoxLayout()
         left.setSpacing(8)
-
         self._thumb = QLabel()
         self._thumb.setFixedSize(THUMB_SIZE, THUMB_SIZE)
         self._thumb.setAlignment(Qt.AlignCenter)
-        self._thumb.setStyleSheet("background: #f1f5f9; border-radius: 8px;")
+        self._thumb.setStyleSheet("background: #1e293b; border-radius: 4px;")
         left.addWidget(self._thumb)
-
-        self._filename = QLabel("")
+        self._filename = QLabel()
         self._filename.setWordWrap(True)
         self._filename.setMaximumWidth(THUMB_SIZE)
-        self._filename.setStyleSheet("color: #334155; font-size: 11px;")
+        # Palette-driven so it stays legible in light AND dark mode. The old
+        # hardcoded #e2e8f0 went near-white on light backgrounds.
+        self._filename.setStyleSheet(
+            "color: palette(window-text); font-size: 12px; font-weight: 700;"
+        )
         left.addWidget(self._filename)
-
-        self._filetype = QLabel("")
-        self._filetype.setStyleSheet("color: #94a3b8; font-size: 10px;")
-        left.addWidget(self._filetype)
+        self._romaji_label = QLabel()
+        self._romaji_label.setWordWrap(True)
+        self._romaji_label.setMaximumWidth(THUMB_SIZE)
+        self._romaji_label.setStyleSheet(
+            "color: palette(mid); font-size: 10px;"
+        )
+        self._romaji_label.setVisible(False)
+        left.addWidget(self._romaji_label)
+        # Context: short list of meaningful path tokens from the archive.
+        # Gives reviewers something to anchor tags against beyond the filename.
+        self._context = QLabel()
+        self._context.setWordWrap(True)
+        self._context.setMaximumWidth(THUMB_SIZE)
+        self._context.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._context.setStyleSheet(
+            "color: palette(window-text); font-size: 10px; line-height: 14px;"
+        )
+        left.addWidget(self._context)
         left.addStretch()
-        content.addLayout(left)
+        main.addLayout(left)
 
         # Right: genre + tags
         right = QVBoxLayout()
-        right.setSpacing(12)
+        right.setSpacing(10)
 
-        # Genre row
-        genre_label = QLabel("Genre")
-        genre_label.setStyleSheet("color: #64748b; font-size: 11px; font-weight: 600;")
-        right.addWidget(genre_label)
-
+        # Genre buttons — click to pick. (Hotkeys removed: spacebar advances.)
+        # autoDefault/default are explicitly OFF: QDialog otherwise treats
+        # the first QPushButton as the dialog's default and any Enter press
+        # in the search field would click it (silently flipping genre to
+        # Avatar Base every time the user created a new tag).
         genre_row = QHBoxLayout()
-        genre_row.setSpacing(8)
+        genre_row.setSpacing(6)
+        self._genre_btns: dict[str, QPushButton] = {}
         for name in GENRE_NAMES:
-            btn = _GenreButton(name)
-            btn.clicked.connect(lambda checked, n=name: self._on_genre_clicked(n))
-            self._genre_buttons[name] = btn
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
+            btn.setMinimumHeight(36)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, n=name: self._select_genre(n))
+            self._genre_btns[name] = btn
             genre_row.addWidget(btn)
-        genre_row.addStretch()
         right.addLayout(genre_row)
+        self._update_genre_styles()
 
-        # Tags section
-        tags_label = QLabel("Tags — click to toggle")
-        tags_label.setStyleSheet("color: #64748b; font-size: 11px; font-weight: 600; margin-top: 8px;")
-        right.addWidget(tags_label)
-
-        # Search bar
+        # Tag search/add — palette-driven for legibility, lives between
+        # genre row and chip list. Live-filters the suggested chips and
+        # creates the tag on Enter when nothing matches.
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Type to add tag...")
-        self._search.setFixedHeight(32)
-        self._search.setStyleSheet("""
-            QLineEdit {
-                background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
-                padding: 0 12px; font-size: 12px;
-            }
-            QLineEdit:focus { border-color: #3b82f6; background: white; }
-        """)
-        self._search.textChanged.connect(lambda: self._search_timer.start())
+        self._search.setPlaceholderText("Search tags or press Enter to add a new one")
+        self._search.setMinimumHeight(28)
+        self._search.textChanged.connect(self._on_search_changed)
         self._search.returnPressed.connect(self._on_search_enter)
         right.addWidget(self._search)
 
-        self._search_popup = _SearchPopup(self)
-        self._search_popup.tag_selected.connect(self._on_add_tag)
-
-        # Tag chips scroll area
+        # Tags area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea { background: transparent; }")
-        self._chips_container = QWidget()
-        self._chips_container.setStyleSheet("background: transparent;")
-        self._chips_layout = FlowLayout(spacing=8)
-        self._chips_container.setLayout(self._chips_layout)
-        scroll.setWidget(self._chips_container)
+        self._tags_box = QWidget()
+        self._tags_box.setStyleSheet("background: transparent;")
+        self._tags_layout = QVBoxLayout(self._tags_box)
+        self._tags_layout.setSpacing(6)
+        self._tags_layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(self._tags_box)
         right.addWidget(scroll, 1)
 
-        content.addLayout(right, 1)
-        layout.addLayout(content, 1)
+        main.addLayout(right, 1)
+        root.addLayout(main, 1)
 
-        # Footer
-        footer = QHBoxLayout()
-        self._hint = QLabel("Space = Save & Next")
-        self._hint.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        footer.addWidget(self._hint)
-        footer.addStretch()
-
+        # Bottom buttons
+        btm = QHBoxLayout()
+        btm.addStretch()
         skip_btn = QPushButton("Skip")
-        skip_btn.setFixedWidth(70)
-        skip_btn.setStyleSheet("""
-            QPushButton { background: #f1f5f9; color: #64748b; border: none;
-                          border-radius: 6px; padding: 8px; font-weight: 500; }
-            QPushButton:hover { background: #e2e8f0; }
-        """)
-        skip_btn.clicked.connect(self._on_skip)
-        footer.addWidget(skip_btn)
-
+        skip_btn.setMinimumWidth(80)
+        skip_btn.setAutoDefault(False)
+        skip_btn.clicked.connect(self._skip)
+        btm.addWidget(skip_btn)
         save_btn = QPushButton("Save")
-        save_btn.setFixedWidth(70)
-        save_btn.setStyleSheet("""
-            QPushButton { background: #3b82f6; color: white; border: none;
-                          border-radius: 6px; padding: 8px; font-weight: 500; }
-            QPushButton:hover { background: #2563eb; }
-        """)
-        save_btn.clicked.connect(self._on_save)
-        footer.addWidget(save_btn)
-
+        save_btn.setMinimumWidth(80)
+        save_btn.setAutoDefault(False)
+        save_btn.setStyleSheet("background: #3b82f6; color: white; font-weight: bold;")
+        save_btn.clicked.connect(self._save)
+        btm.addWidget(save_btn)
         done_btn = QPushButton("Done")
-        done_btn.setFixedWidth(70)
-        done_btn.setStyleSheet("""
-            QPushButton { background: #22c55e; color: white; border: none;
-                          border-radius: 6px; padding: 8px; font-weight: 500; }
-            QPushButton:hover { background: #16a34a; }
-        """)
-        done_btn.clicked.connect(self._on_done)
-        footer.addWidget(done_btn)
-        layout.addLayout(footer)
+        done_btn.setMinimumWidth(80)
+        done_btn.setAutoDefault(False)
+        done_btn.clicked.connect(self._finish)
+        btm.addWidget(done_btn)
+        root.addLayout(btm)
 
-    def _on_genre_clicked(self, name: str):
-        for n, btn in self._genre_buttons.items():
-            btn.setChecked(n == name)
-
-    def _load_assets(self):
+    def _load_queue(self):
         self._assets = self._queries.get_unlabeled_tag_assets(limit=200)
         if not self._assets:
-            self._title.setText("All Done")
-            self._hint.setText("No more assets need tag labels.")
-            self._progress.setVisible(False)
+            self._progress_lbl.setText("All done!")
             return
-        self._current_idx = 0
-        self._progress.setRange(0, len(self._assets))
-        self._show_current()
+        self._idx = 0
+        self._show()
 
-    def _prefetch_more(self):
-        """Load another batch of assets and append to the queue."""
-        if self._loading_more:
+    def _show(self):
+        if self._idx >= len(self._assets):
+            self._finish()
             return
-        self._loading_more = True
-        try:
-            more = self._queries.get_unlabeled_tag_assets(limit=100)
-            existing_ids = {a.id for a in self._assets}
-            new_assets = [a for a in more if a.id not in existing_ids]
-            if new_assets:
-                self._assets.extend(new_assets)
-                self._progress.setRange(0, len(self._assets))
-        finally:
-            self._loading_more = False
 
-    def _show_current(self):
-        self._clear_chips()
-
-        asset = self._assets[self._current_idx]
-        self._title.setText(f"{self._current_idx + 1} / {len(self._assets)}")
-        self._progress.setValue(self._current_idx)
+        asset = self._assets[self._idx]
+        self._progress_lbl.setText(f"{self._idx + 1} / {len(self._assets)}")
         self._filename.setText(asset.filename)
-        self._filetype.setText(f"{asset.filetype} • {asset.file_size:,} B")
+        from vrc_organizer.romaji import has_japanese, to_romaji
+        from PySide6.QtCore import QSettings
+        if QSettings().value("show_romaji", True, type=bool) and has_japanese(asset.filename):
+            self._romaji_label.setText(to_romaji(asset.filename))
+            self._romaji_label.setVisible(True)
+        else:
+            self._romaji_label.setVisible(False)
+        self._context.setText(self._build_context_text(asset))
 
         # Thumbnail
-        thumb_path = self._thumb_cache_dir / f"{asset.id}.png"
-        pix = QPixmap(str(thumb_path))
-        if not pix.isNull():
+        p = self._thumb_cache_dir / f"{asset.id}.png"
+        if p.exists():
+            pix = QPixmap(str(p))
             self._thumb.setPixmap(pix.scaled(THUMB_SIZE, THUMB_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             self._thumb.clear()
-            self._thumb.setText("No preview")
+            self._thumb.setText("?")
 
-        # Load current tags
+        # Load tags
         tags = self._queries.get_tags_for_asset(asset.id)
-        self._original_tags = [tid for tid, _, _ in tags]
+        self._orig_tags = {t[0] for t in tags}
+        self._orig_genre = None
 
-        # Genre detection + uncheck all first
-        for btn in self._genre_buttons.values():
+        # Reset genre
+        for btn in self._genre_btns.values():
             btn.setChecked(False)
 
-        non_genre_tags: list[tuple[int, str, str]] = []
-        for tid, name, color in tags:
+        # Populate
+        active: list[tuple[int, str]] = []
+        for tid, name, _ in tags:
             if name in GENRE_NAMES:
-                self._genre_buttons[name].setChecked(True)
+                self._genre_btns[name].setChecked(True)
+                self._orig_genre = tid
             else:
-                non_genre_tags.append((tid, name, color))
+                active.append((tid, name))
 
-        # Create tag chips
-        for tid, name, color in non_genre_tags:
-            chip = _TagChip(tid, name, active=True)
-            self._chips_layout.addWidget(chip)
-            self._tag_chips.append(chip)
+        self._update_genre_styles()
+        self._build_tags(active, asset)
 
-        # Load suggestions
-        self._load_suggestions(asset.id, non_genre_tags)
-        self._chips_layout.activate()
-        needed = self._chips_layout.heightForWidth(self._chips_container.width())
-        self._chips_container.setMinimumHeight(max(needed, 32))
-        self._chips_container.adjustSize()
+    def _build_tags(self, active: list[tuple[int, str]], asset: Asset):
+        # Clear old
+        for w, _, _ in self._chips:
+            w.deleteLater()
+        self._chips.clear()
+        while self._tags_layout.count():
+            self._tags_layout.takeAt(0)
 
-    def _clear_chips(self):
-        # Remove all items from flow layout
-        while self._chips_layout.count() > 0:
-            item = self._chips_layout.takeAt(0)
-            if item and item.widget():
-                item.widget().hide()
-                item.widget().deleteLater()
-        self._tag_chips.clear()
-        self._chips_container.adjustSize()
+        # Existing tags (active)
+        if active:
+            row = self._make_row("Current", "#3b82f6")
+            for tid, name in active:
+                chip = self._make_chip(tid, name, "active")
+                row.addWidget(chip)
+            row.addStretch()
+            self._tags_layout.addLayout(row)
 
-    def _load_suggestions(self, asset_id: int, existing_tags: list[tuple[int, str, str]]):
-        existing_ids = {t[0] for t in existing_tags}
-        existing_names = {t[1].lower() for t in existing_tags}
-        suggested: dict[int, str] = {}
+        # Suggestions
+        suggestions = self._get_suggestions(asset, active)
+        if suggestions:
+            row = self._make_row("Suggested", "#94a3b8")
+            for tid, name in suggestions[:8]:
+                chip = self._make_chip(tid, name, "suggested")
+                row.addWidget(chip)
+            row.addStretch()
+            self._tags_layout.addLayout(row)
 
-        # 1. Auto-tagger raw suggestions from filename
-        asset = self._assets[self._current_idx]
-        auto_tag_ids = suggest_tags(self._queries, asset.filename, None)
-        id_to_name = {tid: name for tid, name, _, _ in self._queries.get_all_tags()}
-        for tid in auto_tag_ids[:6]:
+        self._tags_layout.addStretch()
+
+    def _make_row(self, label: str, color: str) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: 700; min-width: 60px;"
+        )
+        row.addWidget(lbl)
+        return row
+
+    def _build_context_text(self, asset) -> str:
+        """Pull a few useful path tokens out of the asset's scan_results so
+        the reviewer has visible context beyond the filename."""
+        try:
+            entries = self._queries.get_scan_results(asset.id)
+        except Exception:
+            return ""
+        if not entries:
+            return ""
+
+        # Collect distinct top-level folders and a few notable file basenames.
+        folders: list[str] = []
+        files: list[str] = []
+        seen_folders: set[str] = set()
+        notable = (".prefab", ".fbx", ".blend", ".psd", ".png", ".jpg", ".mat", ".controller", ".anim", ".cs")
+        for name, etype, size in entries[:400]:
+            n = name.replace("\\", "/")
+            parts = n.split("/")
+            if len(parts) > 1:
+                top = parts[0]
+                if top not in seen_folders and len(folders) < 5:
+                    seen_folders.add(top)
+                    folders.append(top)
+            base = parts[-1].lower()
+            if any(base.endswith(ext) for ext in notable) and len(files) < 6:
+                if base not in files:
+                    files.append(parts[-1])
+
+        lines: list[str] = []
+        if folders:
+            lines.append("📁 " + " / ".join(folders))
+        if files:
+            lines.append("📄 " + ", ".join(files[:6]))
+        return "\n".join(lines)
+
+    def _make_chip(self, tid: int, name: str, state: str) -> QPushButton:
+        btn = QPushButton(name)
+        btn.setCheckable(True)
+        btn.setChecked(state == "active")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(28)
+        btn.clicked.connect(lambda: self._toggle_chip(btn, tid, name))
+        self._chips.append((btn, tid, state))
+        self._style_chip(btn, state if state == "suggested" and not btn.isChecked() else ("active" if btn.isChecked() else "rejected"))
+        return btn
+
+    def _style_chip(self, btn: QPushButton, state: str):
+        if state == "active":
+            btn.setStyleSheet("""
+                QPushButton { background: #3b82f6; color: white; border: none;
+                    border-radius: 7px; padding: 4px 12px; font-size: 12px; }
+                QPushButton:hover { background: #2563eb; }
+            """)
+        elif state == "rejected":
+            btn.setStyleSheet("""
+                QPushButton { background: #7f1d1d; color: #fca5a5; border: none;
+                    border-radius: 7px; padding: 4px 12px; font-size: 12px;
+                    text-decoration: line-through; }
+                QPushButton:hover { background: #991b1b; }
+            """)
+        else:  # suggested — bumped contrast: bright text on dashed border
+            btn.setStyleSheet("""
+                QPushButton { background: transparent; color: #e2e8f0;
+                    border: 1px dashed #64748b; border-radius: 7px;
+                    padding: 4px 12px; font-size: 12px; font-weight: 500; }
+                QPushButton:hover { background: #1e3a5f; border-color: #3b82f6; color: white; }
+            """)
+
+    def _toggle_chip(self, btn: QPushButton, tid: int, name: str):
+        # Find chip state
+        for i, (w, t, s) in enumerate(self._chips):
+            if w is btn:
+                if btn.isChecked():
+                    new_state = "active"
+                else:
+                    new_state = "rejected" if s != "suggested" else "suggested"
+                self._chips[i] = (w, t, new_state if s == "suggested" else s)
+                self._style_chip(btn, new_state)
+                # When the user accepts a suggested tag, pull in MORE related
+                # suggestions via co-occurrence — related tags often travel
+                # in groups, so surfacing the next layer saves clicks.
+                if new_state == "active":
+                    self._extend_suggestions(tid)
+                break
+
+    def _extend_suggestions(self, source_tid: int):
+        """Append related-tag chips that aren't already on screen."""
+        existing_ids = {t for _, t, _ in self._chips}
+        target_row = None
+        for i in range(self._tags_layout.count()):
+            item = self._tags_layout.itemAt(i)
+            inner = item.layout() if item else None
+            if inner is None:
+                continue
+            # Heuristic: pick the row whose label says "Suggested".
+            lbl_item = inner.itemAt(0)
+            lbl = lbl_item.widget() if lbl_item else None
+            if isinstance(lbl, QLabel) and lbl.text().startswith("Suggested"):
+                target_row = inner
+                break
+        added = 0
+        for rid, rname, _count in self._queries.get_related_tags(source_tid, limit=6):
+            if added >= 4 or rid in existing_ids or rname in GENRE_NAMES:
+                continue
+            chip = self._make_chip(rid, rname, "suggested")
+            if target_row is not None:
+                # Drop in before the trailing stretch.
+                target_row.insertWidget(target_row.count() - 1, chip)
+            else:
+                # No suggested row yet — make one.
+                row = self._make_row("Suggested", "#94a3b8")
+                row.addWidget(chip)
+                row.addStretch()
+                self._tags_layout.addLayout(row)
+                target_row = row
+            existing_ids.add(rid)
+            added += 1
+
+    def _get_suggestions(self, asset: Asset, existing: list[tuple[int, str]]) -> list[tuple[int, str]]:
+        existing_ids = {t[0] for t in existing}
+        existing_names = {t[1].lower() for t in existing}
+        seen: set[int] = set(existing_ids)
+        result: list[tuple[int, str]] = []
+
+        # Auto-tagger
+        auto_ids = suggest_tags(self._queries, asset.filename, None)
+        id_to_name = {t[0]: t[1] for t in self._queries.get_all_tags()}
+        for tid in auto_ids:
             name = id_to_name.get(tid)
-            if name and tid not in existing_ids and name.lower() not in existing_names:
-                if name not in GENRE_NAMES:
-                    suggested[tid] = name
+            if name and tid not in seen and name not in GENRE_NAMES:
+                seen.add(tid)
+                result.append((tid, name))
 
-        # 2. Co-occurrence suggestions
+        # Co-occurrence
         for tid in existing_ids:
-            related = self._queries.get_related_tags(tid, limit=3)
-            for rid, rname, _ in related:
-                if rid not in existing_ids and rname.lower() not in existing_names:
-                    if rname not in GENRE_NAMES:
-                        suggested[rid] = rname
+            for rid, rname, _ in self._queries.get_related_tags(tid, limit=2):
+                if rid not in seen and rname not in GENRE_NAMES:
+                    seen.add(rid)
+                    result.append((rid, rname))
 
-        # 3. Hierarchy children suggestions
-        for _, name, _ in existing_tags:
-            if name in TAG_HIERARCHY:
-                children = list(TAG_HIERARCHY[name])[:3]
-                for child in children:
-                    if child.lower() not in existing_names:
-                        tag = self._queries.get_tag_by_name(child)
-                        if tag and tag[0] not in existing_ids:
-                            suggested[tag[0]] = child
+        return result
 
-        for tid, name in list(suggested.items())[:6]:
-            chip = _TagChip(tid, name, active=False, suggested=True)
-            self._chips_layout.addWidget(chip)
-            self._tag_chips.append(chip)
+    def _select_genre(self, name: str):
+        for n, btn in self._genre_btns.items():
+            btn.setChecked(n == name)
+        self._update_genre_styles()
 
-    def _do_search(self):
-        text = self._search.text().strip()
-        if len(text) < 1:
-            self._search_popup.hide()
-            return
-        results = self._queries.search_tags(text, limit=6)
-        current_ids = {c.tag_id for c in self._tag_chips}
-        filtered = [(tid, name, color, cnt) for tid, name, color, cnt in results
-                    if tid not in current_ids and name not in GENRE_NAMES]
-        self._search_popup.set_results(filtered)
-        if filtered:
-            pos = self._search.mapToGlobal(self._search.rect().bottomLeft())
-            self._search_popup.move(pos)
-            self._search_popup.show()
-            self._search.setFocus()  # keep focus on the search field
+    def _update_genre_styles(self):
+        for name, btn in self._genre_btns.items():
+            if btn.isChecked():
+                btn.setStyleSheet("""
+                    QPushButton { background: #22c55e; color: white; border: none;
+                        border-radius: 3px; font-weight: bold; }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155;
+                        border-radius: 3px; }
+                    QPushButton:hover { background: #334155; color: white; }
+                """)
+
+    def _on_search_changed(self, text: str):
+        """Live filter the chip rows. A chip whose name contains the query
+        stays visible; everything else fades out. Empty query shows all.
+
+        Includes chips just created in this session (they're in self._chips
+        so they get filtered the same way as the pre-existing ones).
+        """
+        q = text.lower().strip()
+        for btn, _tid, _state in self._chips:
+            if not q:
+                btn.setVisible(True)
+            else:
+                btn.setVisible(q in btn.text().lower())
 
     def _on_search_enter(self):
         text = self._search.text().strip()
         if not text:
             return
+        self._search.clear()
 
-        # If popup is visible with results, select the first one
-        if self._search_popup.isVisible() and self._search_popup._list.count() > 0:
-            item = self._search_popup._list.item(0)
-            tag_id = item.data(Qt.UserRole)
-            tag_name = item.data(Qt.UserRole + 1)
-            self._on_add_tag(tag_id, tag_name)
-            return
-
-        # Check if exact match exists
+        # Find or create tag
         existing = self._queries.get_tag_by_name(text)
         if existing:
-            tag_id, tag_name, _ = existing
-            if tag_name not in GENRE_NAMES and not any(c.tag_id == tag_id for c in self._tag_chips):
-                self._on_add_tag(tag_id, tag_name)
-            else:
-                self._search.clear()
+            tid, name, _ = existing
+        else:
+            tid = self._queries.create_tag(text)
+            name = text
+        if not tid:
             return
 
-        # Create new tag
-        if text in GENRE_NAMES:
-            self._search.clear()
+        if name in GENRE_NAMES:
             return
-        tag_id = self._queries.create_tag(text)
-        self._on_add_tag(tag_id, text)
 
-    def _on_add_tag(self, tag_id: int, tag_name: str):
-        self._search.clear()
-        self._search_popup.hide()
-        if any(c.tag_id == tag_id for c in self._tag_chips):
+        # Already showing this chip? Toggle it on instead of duplicating.
+        for btn, t, _ in self._chips:
+            if t == tid:
+                if not btn.isChecked():
+                    btn.setChecked(True)
+                    self._style_chip(btn, "active")
+                return
+
+        chip = self._make_chip(tid, name, "active")
+        # Try to insert into the first chip row (the "Current" group). If the
+        # tags layout has no row yet — typical for an asset with no existing
+        # tags — build one inline so the chip is actually visible.
+        inserted = False
+        for i in range(self._tags_layout.count()):
+            item = self._tags_layout.itemAt(i)
+            inner = item.layout() if item else None
+            if inner is not None:
+                inner.insertWidget(inner.count() - 1, chip)
+                inserted = True
+                break
+        if not inserted:
+            row = self._make_row("Current", "#2563eb")
+            row.addWidget(chip)
+            row.addStretch()
+            # Drop the row above any trailing stretch so chips don't collapse.
+            self._tags_layout.insertLayout(0, row)
+
+    def _save(self):
+        if self._idx >= len(self._assets):
             return
-        chip = _TagChip(tag_id, tag_name, active=True)
-        self._chips_layout.addWidget(chip)
-        self._tag_chips.append(chip)
-        self._chips_layout.activate()
-        needed = self._chips_layout.heightForWidth(self._chips_container.width())
-        self._chips_container.setMinimumHeight(max(needed, 32))
-        self._chips_container.adjustSize()
+        asset = self._assets[self._idx]
+        accepted, rejected, added = [], [], []
 
-    def _on_skip(self):
-        self._advance()
+        for btn, tid, orig_state in list(self._chips):
+            # Defensive: a chip may have been deleted between when its
+            # signal fired and now (Qt fires queued events). Skip the
+            # zombie instead of crashing the whole save.
+            try:
+                is_checked = btn.isChecked()
+            except RuntimeError:
+                continue
+            was_original = tid in self._orig_tags
 
-    def _on_save(self):
-        asset = self._assets[self._current_idx]
-
-        accepted = []
-        rejected = []
-        added = []
-
-        for chip in self._tag_chips:
-            if chip._suggested:
-                if chip.isChecked():
-                    added.append(chip.tag_id)
-                    self._queries.add_tag_to_asset(asset.id, chip.tag_id)
-            else:
-                if chip.isChecked():
-                    accepted.append(chip.tag_id)
+            if is_checked:
+                if was_original:
+                    accepted.append(tid)
                 else:
-                    rejected.append(chip.tag_id)
-                    self._queries.remove_tag_from_asset(asset.id, chip.tag_id)
+                    added.append(tid)
+                    self._queries.add_tag_to_asset(asset.id, tid)
+            elif was_original:
+                rejected.append(tid)
+                self._queries.remove_tag_from_asset(asset.id, tid)
 
-        # Get selected genre
-        genre_tag_id = None
-        selected_genre = None
-        for name, btn in self._genre_buttons.items():
+        # Genre
+        selected_genre_id = None
+        for name, btn in self._genre_btns.items():
             if btn.isChecked():
-                selected_genre = name
                 tag = self._queries.get_tag_by_name(name)
                 if tag:
-                    genre_tag_id = tag[0]
-                    if genre_tag_id not in self._original_tags:
-                        self._queries.add_tag_to_asset(asset.id, genre_tag_id)
+                    selected_genre_id = tag[0]
+                    if selected_genre_id != self._orig_genre:
+                        self._queries.add_tag_to_asset(asset.id, selected_genre_id)
                 break
 
-        # Remove old genre tags if different
-        for name in GENRE_NAMES:
-            if name != selected_genre:
-                old_tag = self._queries.get_tag_by_name(name)
-                if old_tag and old_tag[0] in self._original_tags:
-                    self._queries.remove_tag_from_asset(asset.id, old_tag[0])
+        if self._orig_genre and self._orig_genre != selected_genre_id:
+            self._queries.remove_tag_from_asset(asset.id, self._orig_genre)
 
-        # Save label record for ML
+        # Record
         self._queries.save_tag_label(
-            asset_id=asset.id,
-            session_id=self._session_id,
-            original_tags=self._original_tags,
-            accepted_tags=accepted,
-            rejected_tags=rejected,
-            added_tags=added,
-            genre_tag_id=genre_tag_id,
+            asset_id=asset.id, session_id=self._session,
+            original_tags=list(self._orig_tags),
+            accepted_tags=accepted, rejected_tags=rejected, added_tags=added,
+            genre_tag_id=selected_genre_id,
         )
 
-        # Record co-occurrence
-        all_kept = accepted + added
-        if genre_tag_id:
-            all_kept.append(genre_tag_id)
-        if len(all_kept) >= 2:
-            self._queries.record_tag_cooccurrence(all_kept)
+        final = accepted + added
+        if selected_genre_id:
+            final.append(selected_genre_id)
+        if len(final) >= 2:
+            self._queries.record_tag_cooccurrence(final)
 
-        self._advance()
+        self._labeled += 1
+        self._next()
 
-    def _advance(self):
-        self._current_idx += 1
-        # Prefetch more when fewer than 10 remain
-        if len(self._assets) - self._current_idx < 10:
-            self._prefetch_more()
-        if self._current_idx < len(self._assets):
-            self._show_current()
-        else:
-            self._finish()
+    def _skip(self):
+        if self._idx >= len(self._assets):
+            return
+        self._next()
+
+    def _next(self):
+        self._idx += 1
+        if len(self._assets) - self._idx < 10:
+            more = self._queries.get_unlabeled_tag_assets(limit=100)
+            existing = {a.id for a in self._assets}
+            self._assets.extend(a for a in more if a.id not in existing)
+        self._show()
 
     def _finish(self):
-        QMessageBox.information(
-            self, "Complete",
-            f"Labeled {self._current_idx} asset(s).\n\n"
-            "Tag corrections have been saved."
-        )
+        if self._labeled:
+            QMessageBox.information(self, "Done", f"Labeled {self._labeled} asset(s).")
         self.labeling_complete.emit()
         self.accept()
 
-    def _on_done(self):
-        if self._current_idx < len(self._assets):
-            remaining = len(self._assets) - self._current_idx
-            reply = QMessageBox.question(
-                self, "Exit Early?",
-                f"{remaining} asset(s) remaining.\n\nExit now?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
-        self.labeling_complete.emit()
-        self.accept()
-
-    def keyPressEvent(self, event: QKeyEvent):
-        key = event.key()
-        if key == Qt.Key_Return or key == Qt.Key_Enter:
-            if self._search.hasFocus():
-                if self._search.text().strip():
-                    # Let returnPressed handle tag creation
-                    super().keyPressEvent(event)
-                # If search is focused but empty, ignore Enter (don't save)
-                return
-            self._on_save()
+    def keyPressEvent(self, e: QKeyEvent):
+        # Don't hijack keys while the user is typing into the tag search.
+        if self._search.hasFocus():
+            super().keyPressEvent(e)
             return
-        if key == Qt.Key_Escape:
-            self._on_done()
-        elif key == Qt.Key_Space and not self._search.hasFocus():
-            self._on_save()
+
+        k = e.key()
+        if k == Qt.Key_Space:
+            self._save()
+        elif k == Qt.Key_S:
+            self._skip()
+        elif k == Qt.Key_Escape:
+            self._finish()
         else:
-            super().keyPressEvent(event)
+            super().keyPressEvent(e)

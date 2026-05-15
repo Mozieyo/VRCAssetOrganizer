@@ -1,6 +1,6 @@
 ﻿{
   "name": "VrcAssetOrganizer",
-  "version": "0.0.2-alpha",
+  "version": "0.1.0-alpha",
   "description": "Desktop asset manager for VRchat avatar creators — organizes, tags, and browses 3D assets downloaded from online marketplaces",
   "author": "Moji",
   "license": "MIT",

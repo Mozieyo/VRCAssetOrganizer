@@ -69,20 +69,21 @@ class ImportWorker(BaseWorker):
         if existing is not None and existing.mod_time == mod_time:
             return existing.id
 
-        # Extract archives before scanning
-        if self._is_cancelled:
-            return None
-        extracted_path = self._maybe_extract(filepath)
-
+        # In-place loading: scan the archive without extracting (see
+        # REWRITE_PROPOSAL.md §3 "Files stay exactly where the user put
+        # them"). Archives are read entry-by-entry by the scanners and the
+        # thumb worker. We no longer copy the archive's contents into a
+        # managed library directory.
         if self._is_cancelled:
             return None
         report = scan_file(filepath)
+        extracted_path: Optional[Path] = None  # kept for downstream auto-tagger
 
         if self._is_cancelled:
             return None
         asset_id = self._queries.insert_asset(
             filename=filepath.name,
-            filepath=extracted_path or filepath,
+            filepath=filepath,
             filetype=report.filetype,
             file_size=file_size,
             mod_time=mod_time,
@@ -103,7 +104,7 @@ class ImportWorker(BaseWorker):
 
         self._queries.update_scan_state(asset_id, "done")
 
-        # Auto-tag based on filename + extracted folder names.
+        # Auto-tag based on filename + extracted folder names + scan metadata.
         # Note: build the id↔name map AFTER suggest_tags runs — it may have
         # created new tags, and the genre selector must see those names to
         # classify correctly. The previous version snapshotted before
@@ -113,7 +114,7 @@ class ImportWorker(BaseWorker):
         try:
             from vrc_organizer.tag_data import GENRE_NAMES
 
-            tag_ids = suggest_tags(self._queries, filepath.name, extracted_path)
+            tag_ids = suggest_tags(self._queries, filepath.name, extracted_path, report.metadata)
 
             all_tags = self._queries.get_all_tags()
             id_to_name = {tid: name for tid, name, _, _ in all_tags}
@@ -168,20 +169,20 @@ class ImportWorker(BaseWorker):
 
         if suffix == '.rar':
             try:
-                import subprocess
+                import rarfile
+                # Configure rarfile to find UnRAR tool
+                _configure_rarfile()
                 extract_to.mkdir(parents=True, exist_ok=True)
-                result = subprocess.run(
-                    ['unrar', 'x', '-o+', str(filepath), str(extract_to)],
-                    capture_output=True, timeout=300
-                )
-                if result.returncode == 0:
-                    return extract_to
-                logger.warning("unrar failed for %s: %s", filepath,
-                               result.stderr.decode(errors='replace').strip())
-            except FileNotFoundError:
-                logger.warning("unrar not installed — cannot extract %s", filepath)
+                with rarfile.RarFile(filepath, 'r') as rf:
+                    rf.extractall(extract_to)
+                return extract_to
+            except ImportError:
+                logger.warning("rarfile library not installed — cannot extract %s", filepath)
+            except rarfile.RarCannotExec:
+                logger.warning("UnRAR not found — install WinRAR or add unrar to PATH for %s", filepath)
             except Exception as e:
                 logger.warning("RAR extraction error for %s: %s", filepath, e)
+                shutil.rmtree(extract_to, ignore_errors=True)
 
         return None
 
@@ -190,6 +191,31 @@ class ImportWorker(BaseWorker):
         thumb_path.parent.mkdir(parents=True, exist_ok=True)
         thumb_path.write_bytes(data)
         return thumb_path
+
+
+def _configure_rarfile():
+    """Configure rarfile to find UnRAR executable or DLL."""
+    import rarfile
+    import sys
+
+    # Check common Windows locations for UnRAR
+    if sys.platform == 'win32':
+        common_paths = [
+            Path(os.environ.get("ProgramFiles", "")) / "WinRAR" / "UnRAR.exe",
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "WinRAR" / "UnRAR.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "WinRAR" / "UnRAR.exe",
+            Path.home() / "AppData" / "Local" / "Programs" / "WinRAR" / "UnRAR.exe",
+        ]
+        for p in common_paths:
+            if p.exists():
+                rarfile.UNRAR_TOOL = str(p)
+                return
+
+    # Also check if bundled with the app
+    app_dir = Path(__file__).parent.parent
+    bundled = app_dir / "bin" / ("UnRAR.exe" if sys.platform == 'win32' else "unrar")
+    if bundled.exists():
+        rarfile.UNRAR_TOOL = str(bundled)
 
 
 def _extract_nested_zips(root: Path, max_depth: int):
