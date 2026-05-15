@@ -58,7 +58,7 @@ class VrcApp(QApplication):
         super().__init__(argv)
         self.setOrganizationName("VrcAssetOrganizer")
         self.setApplicationName("VrcAssetOrganizer")
-        self.setApplicationVersion("0.1.0")
+        self.setApplicationVersion("0.1.0-alpha")
 
         self.app_data_dir = get_app_data_dir()
         self.db_path = resolve_db_path()

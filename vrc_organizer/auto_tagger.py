@@ -8,7 +8,9 @@ import re
 from pathlib import Path
 from typing import Iterable
 
-from vrc_organizer.tag_data import TOP_AVATARS, WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY
+from vrc_organizer.tag_data import (
+    TOP_AVATARS, WORD_TO_TAG, JP_AVATAR_TO_EN, TAG_HIERARCHY, CREATOR_BY_AVATAR,
+)
 from vrc_organizer.database.queries import Queries
 
 
@@ -16,8 +18,9 @@ def suggest_tags(
     queries: Queries,
     filename: str,
     extracted_path: Path | None = None,
+    scan_metadata: dict[str, str] | None = None,
 ) -> list[int]:
-    """Return tag IDs to auto-assign based on filename and folder contents.
+    """Return tag IDs to auto-assign based on filename, folder contents, and scan metadata.
 
     Matching strategy is recall-leaning but guarded against the classic
     short-key substring FP cascade:
@@ -33,12 +36,39 @@ def suggest_tags(
          detections (direct token / phrase / avatar match). Substring-only
          matches don't promote parents — that's where the worst cascading
          FPs were coming from.
+
+    scan_metadata can include:
+      - creator: extracted from Unity pathname structure
+      - product: extracted from Unity pathname structure
+      - readme_avatars: comma-separated avatar names from README files
     """
     suggested_names: set[str] = set()
     confident_names: set[str] = set()
 
-    # Collect text sources
+    # Process scanner metadata first (high confidence signals)
+    if scan_metadata:
+        # Readme avatars are high confidence — they're explicit compatibility lists
+        readme_avatars = scan_metadata.get("readme_avatars", "")
+        if readme_avatars:
+            for avatar in readme_avatars.split(","):
+                avatar = avatar.strip()
+                if avatar and avatar in TOP_AVATARS:
+                    suggested_names.add(avatar)
+                    confident_names.add(avatar)
+
+        # Creator and product names are additional text sources to tokenize
+        creator = scan_metadata.get("creator", "")
+        product = scan_metadata.get("product", "")
+    else:
+        creator = ""
+        product = ""
+
+    # Collect text sources — filename, extracted path, plus creator/product from scanner
     sources = [filename]
+    if creator:
+        sources.append(creator)
+    if product:
+        sources.append(product)
     if extracted_path and extracted_path.is_dir():
         sources.append(extracted_path.name)
         try:
@@ -75,13 +105,21 @@ def suggest_tags(
                 confident_names.add(tag_name)
 
         # 4. Avatar name matching (popularity-ranked list, English + Japanese)
+        # Short avatar names like "Ash", "Lime", "Rue", "Nia" used to match
+        # any substring of the filename — producing cascading false
+        # positives (ashen, splash, smash, etc). Now: a substring hit only
+        # counts when the avatar name is long enough to be distinctive
+        # (>=5 chars), and short names require an exact token match.
+        SHORT_AVATAR_FLOOR = 5
         for avatar in TOP_AVATARS:
             avatar_lower = avatar.lower()
-            if avatar_lower in normalized_spaces or avatar_lower in normalized:
-                suggested_names.add(avatar)
-                confident_names.add(avatar)
+            if len(avatar_lower) >= SHORT_AVATAR_FLOOR:
+                if avatar_lower in normalized_spaces or avatar_lower in normalized:
+                    suggested_names.add(avatar)
+                    confident_names.add(avatar)
             for token in tokens:
-                if len(token) >= 3 and token == avatar_lower:
+                # Exact token match only — never substring for short names.
+                if token == avatar_lower:
                     suggested_names.add(avatar)
                     confident_names.add(avatar)
 
@@ -95,6 +133,27 @@ def suggest_tags(
                     suggested_names.add(en_tag)
                     confident_names.add(en_tag)
 
+        # User-created tags become live aliases for the matcher. Anything
+        # the user has tagged manually that shows up in a later import's
+        # filename gets re-suggested. Same short-name discipline as
+        # avatars: only substring-match if the tag name is >=5 chars long.
+        try:
+            for tid, tname, _color, _count in queries.get_all_tags():
+                if not tname or tname.lower() in WORD_TO_TAG:
+                    continue
+                tn = tname.lower()
+                if len(tn) >= 5:
+                    if tn in normalized_spaces or tn in normalized:
+                        suggested_names.add(tname)
+                        confident_names.add(tname)
+                for token in tokens:
+                    if token == tn:
+                        suggested_names.add(tname)
+                        confident_names.add(tname)
+        except Exception:
+            # Tag DB unavailable — fall back silently.
+            pass
+
     # 5. Apply hierarchy parent promotion — only for confident detections.
     # A substring-only match (e.g. "wears" producing "Wear" via "wear" in
     # "wears") will NOT auto-promote to "Outfit" or any other parent. This
@@ -105,6 +164,14 @@ def suggest_tags(
             if tag_name in children:
                 hierarchy_additions.add(parent)
     suggested_names.update(hierarchy_additions)
+
+    # 6. Implicit creator inference — confident avatar matches imply their
+    # creator. Mamehinata/Kipfel → MOCHIYAMA, etc. Pulled from
+    # CREATOR_BY_AVATAR so the user can extend it from one place.
+    for avatar_name in list(confident_names):
+        creator = CREATOR_BY_AVATAR.get(avatar_name)
+        if creator:
+            suggested_names.add(creator)
 
     # Resolve names to tag IDs, creating tags that don't exist yet
     tag_ids: list[int] = []
@@ -152,8 +219,8 @@ GENRE_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-OUTFIT_ACCE_TAGS = {
-    # Clothing — core VRChat outfit categories
+OUTFIT_TAGS = {
+    # Clothing — Outfit genre
     "Outfit", "Dress", "Skirt", "Pants", "Shorts", "Shirt",
     "Jacket", "Sweater", "Hoodie", "Vest", "Coat", "Tops",
     "Bodysuit", "Corset", "Jumpsuit",
@@ -161,24 +228,28 @@ OUTFIT_ACCE_TAGS = {
     "Kimono", "Yukata", "Swimsuit", "Lingerie",
     "Pajamas", "Sportswear", "Maid", "School Uniform", "Military Uniform",
     "Wedding", "Bunny Suit", "Casual",
-    # Footwear / Legwear
-    "Shoes", "Heels", "Boots", "Sandals", "Socks", "Stockings", "Gloves",
-    # Accessories
+    # Footwear / legwear is part of the outfit
+    "Shoes", "Heels", "Boots", "Sandals", "Socks", "Stockings",
+}
+
+ACCESSORY_TAGS = {
     "Accessory", "Hat", "Glasses", "Mask", "Necklace", "Choker",
-    "Earrings", "Bracelet", "Ring", "Bag",
+    "Earrings", "Bracelet", "Ring", "Bag", "Gloves",
     "Hair Accessory", "Ribbon", "Collar", "Cape", "Scarf", "Belt",
     "Wings", "Tail", "Ears", "Horns",
+    # Per user: props fold into Accessory
     "Weapon", "Shield", "Prop",
-    # Hair
+    # Hair lives here too — a hair pack is not an outfit
     "Hair", "Hairstyle", "Bangs", "Ponytail", "Twin Tails",
     "Bob Cut", "Long Hair", "Short Hair", "Braids", "Ahoge",
     # Body mods
-    "Makeup", "Tattoo", "Chibi",
-    # Texture / Material
+    "Makeup", "Tattoo",
+    # Surface assets a creator drops alongside an outfit
     "Texture", "Material",
-    # Decoration attribute
-    "Cute",
 }
+
+# Back-compat alias for any callers that imported the old name.
+OUTFIT_ACCE_TAGS = OUTFIT_TAGS | ACCESSORY_TAGS
 
 
 def suggest_genre(
@@ -186,39 +257,42 @@ def suggest_genre(
     filetype: str,
     suggested_tag_names: set[str],
 ) -> str:
-    """Determine which of the 4 genres an asset belongs to."""
+    """Determine which of the 5 genres an asset belongs to.
+
+    Genres are mutually exclusive: Avatar Base | Outfit | Accessory | Gimmick | Tools.
+    """
     filename_lower = filename.lower()
 
-    # Direct avatar base tag → Avatar Base
     if "Avatar Base" in suggested_tag_names:
         return "Avatar Base"
 
-    # Check filename keywords (e.g. "facetracking" → Gimmick)
     for genre, keywords in GENRE_KEYWORDS.items():
         for kw in keywords:
             if kw in filename_lower:
                 return genre
 
-    # Check tag-based deduction (e.g. "Gimmick" tag → Gimmick, "Prefab" → Tools)
     for tag_name in suggested_tag_names:
         if tag_name in GENRE_TAG_MAP:
             return GENRE_TAG_MAP[tag_name]
 
-    # If any outfit/acce tag is present → Outfit & Acce
-    if suggested_tag_names & OUTFIT_ACCE_TAGS:
-        return "Outfit & Acce"
+    # Outfit beats Accessory when both are signaled — a full outfit pack
+    # usually ships accessories too, but the category should reflect the
+    # primary intent.
+    if suggested_tag_names & OUTFIT_TAGS:
+        return "Outfit"
+    if suggested_tag_names & ACCESSORY_TAGS:
+        return "Accessory"
 
-    # If an avatar name is detected and nothing more specific matched, it's an Avatar Base
     for avatar in TOP_AVATARS:
         if avatar in suggested_tag_names:
             return "Avatar Base"
 
-    # Filetype heuristics
     if filetype in ("shader", "prefab"):
         return "Tools"
 
-    # Default
-    return "Outfit & Acce"
+    # Default: Accessory is a softer landing than the old "Outfit & Acce" —
+    # an asset with no signal is more often a small accessory than a full outfit.
+    return "Accessory"
 
 
 def _tokenize(text: str) -> list[str]:

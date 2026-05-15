@@ -13,8 +13,8 @@ from PySide6.QtGui import QPixmapCache
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QDockWidget, QLabel,
     QStatusBar, QMenuBar, QMenu, QToolBar, QLineEdit, QSlider,
-    QVBoxLayout, QProgressBar, QFileDialog, QCheckBox, QMessageBox,
-    QPushButton, QDialog, QDialogButtonBox, QScrollArea,
+    QVBoxLayout, QHBoxLayout, QProgressBar, QFileDialog, QCheckBox, QMessageBox,
+    QPushButton, QDialog, QDialogButtonBox, QScrollArea, QApplication,
     QListWidget, QListWidgetItem, QGroupBox, QRadioButton,
 )
 
@@ -64,8 +64,15 @@ class MainWindow(QMainWindow):
 
         self._seed_default_tags()
         self._queries.purge_expired_trash(days=30)
+        self._queries.requeue_failed_thumbs()
+        # Rename "Outfit & Acce" → "Outfit" (the new taxonomy splits it
+        # from Accessory). One-shot, idempotent.
+        self._queries.migrate_legacy_genres()
         self._sidebar.refresh()
         self._model.refresh()
+
+        # Start background thumbnail generation for any pending assets
+        QTimer.singleShot(500, self._start_background_thumbs)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -130,6 +137,17 @@ class MainWindow(QMainWindow):
         self._inspector_toggle_action.setChecked(True)
         self._inspector_toggle_action.triggered.connect(self._on_toggle_inspector)
 
+        view_menu.addSeparator()
+        # Show romaji "furigana" alongside Japanese asset titles.
+        # Persisted via QSettings so the preference survives a restart.
+        from PySide6.QtCore import QSettings
+        self._show_romaji_action = view_menu.addAction("Show Romaji (furigana)")
+        self._show_romaji_action.setCheckable(True)
+        self._show_romaji_action.setChecked(
+            QSettings().value("show_romaji", True, type=bool)
+        )
+        self._show_romaji_action.toggled.connect(self._on_toggle_romaji)
+
         prefs_menu = mb.addMenu("&Preferences")
         self._dark_action = prefs_menu.addAction("Dark Mode")
         self._dark_action.setCheckable(True)
@@ -150,6 +168,10 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction("Export Training Data...", self._on_export_training)
         tools_menu.addAction("Import Training Data...", self._on_import_training)
+        tools_menu.addAction("Crawl Folder for Training Signals...", self._on_crawl_training)
+        tools_menu.addSeparator()
+        tools_menu.addAction("Export Shared Tag Pool (for friends)...", self._on_export_pool)
+        tools_menu.addAction("Import Shared Tag Pool (from friends)...", self._on_import_pool)
         tools_menu.addSeparator()
         tools_menu.addAction("Purge Cache && Packages...", self._on_purge_cache)
 
@@ -159,35 +181,41 @@ class MainWindow(QMainWindow):
     # ── Toolbar ─────────────────────────────────────────────
 
     def _setup_toolbar(self):
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        tb.setIconSize(QSize(20, 20))
-
+        # Toolbar widgets are hosted inside the grid panel (search left, asset
+        # count + density slider right). Built here so they exist before the
+        # central widget references them.
         self._search_bar = QLineEdit()
-        self._search_bar.setPlaceholderText("Search assets...")
-        self._search_bar.setMaximumWidth(300)
+        self._search_bar.setPlaceholderText("Search assets")
+        self._search_bar.setClearButtonEnabled(True)
+        self._search_bar.setMaximumWidth(280)
+        # No fixed height — the theme stylesheet sets vertical padding, and a
+        # 26px clamp crops descenders on Korean/Japanese characters.
+        self._search_bar.setMinimumHeight(28)
         self._search_bar.textChanged.connect(self._on_search_changed)
-        tb.addWidget(self._search_bar)
 
-        self._global_search_cb = QCheckBox("Search All")
+        self._global_search_cb = QCheckBox("All")
         self._global_search_cb.setToolTip("Search across all assets, ignoring type and tag filters")
         self._global_search_cb.toggled.connect(lambda: self._apply_filters())
-        tb.addWidget(self._global_search_cb)
 
-        tb.addSeparator()
-        grid_label = QLabel(" Grid: ")
-        grid_label.setToolTip("Slide right for larger cards, left for smaller")
-        tb.addWidget(grid_label)
+        # Live asset count label — populated by _refresh_asset_count().
+        self._asset_count_label = QLabel("0 assets loaded")
+        self._asset_count_label.setStyleSheet("color: palette(mid); font-size: 11px;")
 
+        from PySide6.QtCore import QSettings
+        s = QSettings()
+        saved_density = int(s.value("grid_density", 5))
         self._grid_slider = QSlider(Qt.Horizontal)
         self._grid_slider.setRange(1, 10)
-        self._grid_slider.setValue(5)
-        self._grid_slider.setFixedWidth(120)
+        self._grid_slider.setValue(max(1, min(10, saved_density)))
+        self._grid_slider.setFixedWidth(140)
         self._grid_slider.setTickInterval(1)
         self._grid_slider.valueChanged.connect(self._on_grid_size_changed)
-        tb.addWidget(self._grid_slider)
 
-        self.addToolBar(tb)
+    def _refresh_asset_count(self):
+        if not hasattr(self, "_asset_count_label") or not hasattr(self, "_model"):
+            return
+        n = self._model.rowCount()
+        self._asset_count_label.setText(f"{n:,} assets loaded")
 
     # ── Central Widget ──────────────────────────────────────
 
@@ -202,22 +230,39 @@ class MainWindow(QMainWindow):
         grid_panel = QWidget()
         grid_layout = QVBoxLayout(grid_panel)
         grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(4)
+
+        # Header row hosting search (left), grid density (right) — sits
+        # inside the grid panel so it shares the cards' horizontal real estate.
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 6, 8, 4)
+        header_layout.setSpacing(8)
+        header_layout.addWidget(self._search_bar)
+        header_layout.addWidget(self._global_search_cb)
+        header_layout.addWidget(self._asset_count_label)
+        header_layout.addStretch(1)
+        grid_label = QLabel("Grid")
+        grid_label.setStyleSheet("font-size: 11px;")
+        header_layout.addWidget(grid_label)
+        header_layout.addWidget(self._grid_slider)
+        grid_layout.addWidget(header)
 
         self._model = AssetListModel(self._queries)
-        self._delegate = ThumbnailDelegate()
 
         self._grid = AssetListView()
         self._grid.setModel(self._model)
-        self._grid.setItemDelegate(self._delegate)
         self._grid.files_dropped.connect(self._on_files_dropped)
         self._grid.delete_requested.connect(self._on_delete_selected)
-        self._grid.selectionModel().selectionChanged.connect(self._on_selection_changed)
-        self._grid.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._grid.selection_changed.connect(self._on_selection_changed)
         self._grid.customContextMenuRequested.connect(self._on_context_menu)
-        self._model.modelReset.connect(self._grid.recenter)
-        self._model.layoutChanged.connect(self._grid.recenter)
+        self._grid.doubleClicked.connect(self._on_grid_double_clicked)
+        # Keep the "N assets loaded" label in sync with whatever the model holds.
+        self._model.modelReset.connect(self._refresh_asset_count)
+        self._model.rowsInserted.connect(self._refresh_asset_count)
+        self._model.rowsRemoved.connect(self._refresh_asset_count)
 
-        grid_layout.addWidget(self._grid)
+        grid_layout.addWidget(self._grid, 1)
 
         splitter.addWidget(sidebar)
         splitter.addWidget(grid_panel)
@@ -239,6 +284,7 @@ class MainWindow(QMainWindow):
         self._inspector.tag_deleted.connect(self._on_tag_deleted)
         self._inspector.notes_changed.connect(self._on_notes_save)
         self._inspector.open_with.connect(self._on_open_with)
+        self._inspector.import_to_unity.connect(self._on_import_to_unity)
 
         self._inspector_dock = QDockWidget("Inspector", self)
         self._inspector_dock.setWidget(self._inspector)
@@ -247,10 +293,28 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetFloatable |
             QDockWidget.DockWidgetClosable
         )
+        self._inspector.setMinimumWidth(360)
+        from PySide6.QtCore import QSettings
+        saved_w = int(QSettings().value("inspector_width", 560))
+        saved_w = max(360, min(1200, saved_w))
+        self._inspector_dock.resize(saved_w, self._inspector_dock.height())
         self._inspector_dock.visibilityChanged.connect(
             lambda v: self._inspector_toggle_action.setChecked(v)
         )
         self.addDockWidget(Qt.RightDockWidgetArea, self._inspector_dock)
+        self.resizeDocks([self._inspector_dock], [saved_w], Qt.Horizontal)
+        # Catch live resizes (drag the splitter) so the chosen width sticks.
+        self._inspector_dock.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        # Persist the inspector dock width on every resize. QDockWidget
+        # doesn't have a dedicated resize signal, so we hook the event.
+        if obj is getattr(self, "_inspector_dock", None) and event.type() == event.Type.Resize:
+            from PySide6.QtCore import QSettings
+            w = self._inspector_dock.width()
+            if w >= 360:
+                QSettings().setValue("inspector_width", int(w))
+        return super().eventFilter(obj, event)
 
     # ── Status Bar ──────────────────────────────────────────
 
@@ -287,12 +351,20 @@ class MainWindow(QMainWindow):
                 self._on_files_dropped(paths)
 
     def _on_files_dropped(self, paths: list[str]):
-        # Cancel any in-progress import before starting a new one
         if hasattr(self, '_current_worker') and self._current_worker is not None:
             self._current_worker.cancel()
             self._current_worker = None
 
-        self._status_label.setText(f"Importing {len(paths)} file(s)...")
+        # Transparent import message: the user wanted to know exactly what's
+        # happening on disk during an import. Source files stay where they
+        # are (in-place mode); only metadata and thumbnails land in the
+        # AppData cache directories.
+        thumb_dir = self._app.thumb_cache_dir
+        db_path = self._app.db_path
+        self._status_label.setText(
+            f"Importing {len(paths)} file(s) in-place — sources stay put. "
+            f"Metadata → {db_path.name}, thumbnails → {thumb_dir}"
+        )
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
         self._cancel_btn.setVisible(True)
@@ -359,6 +431,8 @@ class MainWindow(QMainWindow):
         self._thumb_worker = None
         if found_ids:
             self._model.refresh()
+        # Continue processing remaining pending thumbnails
+        QTimer.singleShot(50, self._start_background_thumbs)
 
     def _check_multi_unitypackage(self, asset_ids: list[int]):
         """If any imported asset is a zip with multiple .unitypackage files,
@@ -376,15 +450,20 @@ class MainWindow(QMainWindow):
             if len(up_entries) <= 1:
                 continue
 
-            # Show multi-select dialog
+            # Multi-select split dialog. Wording: default (unchecked) is the
+            # safe path — keep the archive as one asset. Checking an entry
+            # promotes that .unitypackage into its OWN asset card.
             dlg = QDialog(self)
-            dlg.setWindowTitle("Multiple Unity Packages Found")
-            dlg.setMinimumWidth(400)
+            dlg.setWindowTitle("Split Multi-Package Archive?")
+            dlg.setMinimumWidth(440)
 
             layout = QVBoxLayout(dlg)
             layout.addWidget(QLabel(
-                f"<b>{asset.filename}</b> contains {len(up_entries)} .unitypackage files.<br>"
-                "Select which ones to import as separate assets:"
+                f"<b>{asset.filename}</b> contains {len(up_entries)} "
+                ".unitypackage files.<br>"
+                "By default the archive is imported as a single asset. "
+                "Tick the packages below that you'd rather import as "
+                "<b>their own separate cards</b>."
             ))
 
             scroll = QScrollArea()
@@ -395,7 +474,7 @@ class MainWindow(QMainWindow):
             for name, etype in sorted(up_entries):
                 cb = QCheckBox(name.split("/")[-1])
                 cb.setToolTip(name)
-                cb.setChecked(True)
+                cb.setChecked(False)  # default OFF — see dialog title
                 check_layout.addWidget(cb)
                 cbs[name] = cb
             check_layout.addStretch()
@@ -403,6 +482,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(scroll)
 
             btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.button(QDialogButtonBox.Ok).setText("Split selected")
+            btns.button(QDialogButtonBox.Cancel).setText("Keep as one asset")
             btns.accepted.connect(dlg.accept)
             btns.rejected.connect(dlg.reject)
             layout.addWidget(btns)
@@ -410,7 +491,6 @@ class MainWindow(QMainWindow):
             if dlg.exec() != QDialog.Accepted:
                 continue
 
-            # Extract and import selected .unitypackage files
             selected = [name for name, cb in cbs.items() if cb.isChecked()]
             if not selected:
                 continue
@@ -435,14 +515,13 @@ class MainWindow(QMainWindow):
 
     # ── Slots: Selection ────────────────────────────────────
 
-    def _on_selection_changed(self, selected, deselected):
-        idxs = self._grid.selectionModel().selectedIndexes()
-        count = len(idxs)
+    def _on_selection_changed(self, *args):
+        selected_ids = self._grid.selected_asset_ids()
+        count = len(selected_ids)
         total = self._model.rowCount()
 
         if count == 1:
-            asset_id = idxs[0].data(Qt.UserRole)
-            asset = self._queries.get_asset(asset_id)
+            asset = self._queries.get_asset(selected_ids[0])
             if asset:
                 self._inspector.show_asset(asset)
         else:
@@ -450,15 +529,21 @@ class MainWindow(QMainWindow):
 
         self._status_label.setText(f"{total} assets • {count} selected")
 
+    def _on_grid_double_clicked(self, index):
+        if not index.isValid():
+            return
+        asset = self._queries.get_asset(index.data(Qt.UserRole))
+        if asset and asset.filepath.exists():
+            os.startfile(str(asset.filepath))
+
     # ── Slots: Context Menu ─────────────────────────────────
 
     def _on_context_menu(self, pos):
-        index = self._grid.indexAt(pos)
-        if not index.isValid():
+        aid = self._grid.current_asset_id()
+        if aid is None:
             return
 
-        asset_id = index.data(Qt.UserRole)
-        asset = self._queries.get_asset(asset_id)
+        asset = self._queries.get_asset(aid)
         if asset is None:
             return
 
@@ -467,8 +552,9 @@ class MainWindow(QMainWindow):
             asset.filetype, self._queries, self._tool_registry, self
         )
         menu.open_in.connect(self._on_open_with)
-        menu.add_tag.connect(lambda tid: self._do_add_tag(asset_id, tid))
+        menu.add_tag.connect(lambda tid: self._do_add_tag(asset.id, tid))
         menu.delete_asset.connect(self._on_delete_asset)
+        menu.delete_file.connect(self._on_delete_file_from_disk)
         menu.rescan.connect(self._on_rescan_asset)
         menu.exec(self._grid.viewport().mapToGlobal(pos))
 
@@ -610,22 +696,54 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Error: {tool_name} — {error_msg}")
 
     def _on_delete_asset(self, asset_id: int):
+        """Right-click → Remove from Library. DB-only, file untouched."""
         asset = self._queries.get_asset(asset_id)
         if asset is None:
             return
         reply = QMessageBox.question(
-            self, "Delete Asset",
-            f"Move \"{asset.filename}\" to the recycle bin?\n\n"
-            f"It will be permanently deleted after 30 days.",
+            self, "Remove from Library",
+            f"Remove \"{asset.filename}\" from the library?\n\n"
+            f"The source file at:\n  {asset.filepath}\n"
+            f"will NOT be deleted — only this app's record of it.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        self._trash_asset(asset)
+        self._remove_asset_db_only(asset)
         self._model.refresh()
-        self._status_label.setText(f"Moved to recycle bin — {self._model.rowCount()} total")
+        self._status_label.setText(f"Removed from library — {self._model.rowCount()} total")
 
-    def _trash_asset(self, asset):
+    def _on_delete_file_from_disk(self, asset_id: int):
+        """Right-click → Delete File from Disk. Recycle bin + DB row."""
+        asset = self._queries.get_asset(asset_id)
+        if asset is None:
+            return
+        reply = QMessageBox.warning(
+            self,
+            "Delete File from Disk?",
+            "This sends the actual file to the Recycle Bin and removes it "
+            "from the library.\n\n"
+            f"  File: {asset.filename}\n"
+            f"  Path: {asset.filepath}\n\n"
+            "Recoverable from the Recycle Bin until you empty it.\n\n"
+            "Are you sure?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._recycle_file_for_asset(asset)
+        self._model.refresh()
+        self._status_label.setText(
+            f"Recycled \"{asset.filename}\" — {self._model.rowCount()} total"
+        )
+
+    def _remove_asset_db_only(self, asset):
+        """Drop the asset's DB row without touching the file."""
+        self._queries.delete_asset(asset.id)
+
+    def _recycle_file_for_asset(self, asset):
+        """Send the asset's file to the Recycle Bin, then drop its DB row."""
         try:
             send2trash.send2trash(str(asset.filepath))
         except Exception:
@@ -633,25 +751,35 @@ class MainWindow(QMainWindow):
         self._queries.delete_asset(asset.id)
 
     def _on_delete_selected(self):
-        idxs = self._grid.selectionModel().selectedIndexes()
-        if not idxs:
+        """Delete key on the grid — bulk Remove from Library (DB-only).
+
+        Multi-select file deletion is intentionally NOT bound to a key.
+        Recycling files goes one-at-a-time through the right-click menu so
+        an accidental keypress can never wipe a batch of source files.
+        """
+        ids = self._grid.selected_asset_ids()
+        if not ids:
             return
-        count = len(idxs)
+        count = len(ids)
         reply = QMessageBox.question(
-            self, "Delete Assets",
-            f"Move {count} asset(s) to the recycle bin?\n\n"
-            f"They will be permanently deleted after 30 days.",
+            self, "Remove from Library",
+            f"Remove {count} asset(s) from the library?\n\n"
+            "Source files on disk will NOT be deleted — only this app's "
+            "records of them.\n\n"
+            "(To delete a file from disk, use right-click → "
+            "\"Delete File from Disk…\" on a single asset.)",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        for idx in idxs:
-            asset_id = idx.data(Qt.UserRole)
+        for asset_id in ids:
             asset = self._queries.get_asset(asset_id)
             if asset:
-                self._trash_asset(asset)
+                self._remove_asset_db_only(asset)
         self._model.refresh()
-        self._status_label.setText(f"{count} asset(s) moved to recycle bin — {self._model.rowCount()} total")
+        self._status_label.setText(
+            f"{count} asset(s) removed from library — {self._model.rowCount()} total"
+        )
 
     # ── Slots: Search / Grid ────────────────────────────────
 
@@ -675,31 +803,71 @@ class MainWindow(QMainWindow):
         )
 
     def _on_grid_size_changed(self, value: int):
-        # Invert: slider 1 = 10 columns (smallest), slider 10 = 1 column (largest)
-        columns = 11 - value
-        grid_w = self._grid.viewport().width()
-        spacing = self._grid.spacing()
-        overhead = 44  # LABEL_HEIGHT + 2 * CARD_PADDING
-        thumb_size = max(32, (grid_w + spacing) // columns - overhead - spacing)
-        self._delegate.set_thumb_size(thumb_size)
-        self._model.set_thumb_size(thumb_size)
+        # Slider 1 = smallest cards (most columns), 10 = largest cards.
+        from PySide6.QtCore import QSettings
+        QSettings().setValue("grid_density", int(value))
+        self._grid.set_density(value)
         count = self._model.rowCount()
         if count > 0:
             self._model.dataChanged.emit(
                 self._model.index(0), self._model.index(count - 1), [Qt.DecorationRole]
             )
-        self._grid.scheduleDelayedItemsLayout()
-        self._grid.recenter()
 
     # ── Menu actions ────────────────────────────────────────
 
     def _on_select_all(self):
-        count = self._model.rowCount()
-        if count > 0:
-            self._grid.selectAll()
+        if self._model.rowCount() > 0:
+            self._grid.select_all()
 
     def _on_toggle_inspector(self, visible: bool):
         self._inspector_dock.setVisible(visible)
+
+    def _on_import_to_unity(self, asset_id: int):
+        """Launch Unity Editor with the asset's .unitypackage as an argument.
+
+        This is the placeholder until the proper Editor plugin lands. We
+        already have a configured Unity path in Preferences; using it here
+        means the user gets *something* working today without a plugin
+        round-trip.
+        """
+        asset = self._queries.get_asset(asset_id)
+        if asset is None:
+            return
+        unity_path = self._queries.get_setting("unity_path", "")
+        if not unity_path or not Path(unity_path).exists():
+            QMessageBox.warning(
+                self, "Unity not configured",
+                "Set the Unity Editor path in Preferences first."
+            )
+            return
+        # The plugin will eventually do a richer handoff (project pick,
+        # status report back). For now: spawn Unity with the package and
+        # let the user pick a target project in Unity's import dialog.
+        try:
+            import subprocess
+            subprocess.Popen(
+                [unity_path, "-importPackage", str(asset.filepath)],
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
+            )
+            self._status_label.setText(
+                f"Sent to Unity: {asset.filename} (plugin in development)"
+            )
+        except OSError as e:
+            QMessageBox.critical(
+                self, "Failed to launch Unity",
+                f"Could not start Unity Editor:\n{e}"
+            )
+
+    def _on_toggle_romaji(self, on: bool):
+        from PySide6.QtCore import QSettings
+        QSettings().setValue("show_romaji", on)
+        # Force a redraw — cards repaint, inspector + tag review pick up the
+        # setting on next show.
+        self._grid.viewport().update()
+        if self._grid._cards:  # type: ignore[attr-defined]
+            self._grid._refresh_card_data()  # type: ignore[attr-defined]
+        if hasattr(self._inspector, "_asset") and self._inspector._asset is not None:  # type: ignore[attr-defined]
+            self._inspector.show_asset(self._inspector._asset)  # type: ignore[attr-defined]
 
     def _on_open_settings(self):
         dlg = SettingsDialog(self._tool_registry, self)
@@ -754,9 +922,9 @@ class MainWindow(QMainWindow):
     # ── Helpers ─────────────────────────────────────────────
 
     def _refresh_inspector(self):
-        idxs = self._grid.selectionModel().selectedIndexes()
-        if len(idxs) == 1:
-            self._refresh_inspector_for(idxs[0].data(Qt.UserRole))
+        ids = self._grid.selected_asset_ids()
+        if len(ids) == 1:
+            self._refresh_inspector_for(ids[0])
 
     def _refresh_inspector_for(self, asset_id: int):
         asset = self._queries.get_asset(asset_id)
@@ -1011,12 +1179,18 @@ class MainWindow(QMainWindow):
         QThreadPool.globalInstance().start(self._thumb_worker)
 
     def _on_label_tags(self):
+        if not self._queries.get_unlabeled_tag_assets(limit=1):
+            self._status_label.setText("No assets need tag labeling — all caught up.")
+            return
         dlg = TagLabelerDialog(self._queries, self._app.thumb_cache_dir, self)
         dlg.labeling_complete.connect(lambda: self._sidebar.refresh())
         dlg.labeling_complete.connect(lambda: self._model.refresh())
         dlg.exec()
 
     def _on_label_covers(self):
+        if not self._queries.get_unlabeled_cover_assets(limit=1):
+            self._status_label.setText("No assets need cover labeling — all caught up.")
+            return
         dlg = CoverLabelerDialog(self._queries, self._app.thumb_cache_dir, self)
         dlg.labeling_complete.connect(self._regenerate_labeled_thumbs)
         dlg.exec()
@@ -1045,8 +1219,11 @@ class MainWindow(QMainWindow):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             QMessageBox.information(
                 self, "Export Complete",
-                f"Exported {len(data.get('cover_labels', []))} cover labels and "
-                f"{len(data.get('tag_reviews', []))} tag reviews."
+                f"Exported:\n"
+                f"  Cover labels: {len(data.get('cover_labels', []))}\n"
+                f"  Tag reviews: {len(data.get('tag_reviews', []))}\n"
+                f"  Tag labels: {len(data.get('tag_labels', []))}\n"
+                f"  Tag co-occurrence: {len(data.get('tag_cooccurrence', []))}"
             )
         except OSError as e:
             QMessageBox.critical(self, "Export Failed", str(e))
@@ -1065,15 +1242,145 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Import Failed", str(e))
             return
         result = self._queries.import_training_data(data)
+        details = []
+        if result.get("cover_labels", 0):
+            details.append(f"  Cover labels: {result['cover_labels']}")
+        if result.get("tag_reviews", 0):
+            details.append(f"  Tag reviews: {result['tag_reviews']}")
+        if result.get("tag_cooccurrence", 0):
+            details.append(f"  Tag co-occurrence: {result['tag_cooccurrence']}")
+        details_str = "\n".join(details) if details else "  (no data)"
         QMessageBox.information(
             self, "Import Complete",
-            f"Imported {result.get('imported', 0)} record(s).\n"
-            f"Skipped {result.get('skipped', 0)} record(s) (asset not found)."
+            f"Imported {result.get('imported', 0)} record(s):\n{details_str}\n\n"
+            f"Skipped {result.get('skipped', 0)} (asset/tag not found)."
         )
+        self._sidebar.refresh()
         self._model.refresh()
 
+    def _on_export_pool(self):
+        """Export the cross-user shareable slice of training data.
+
+        Just the tag names and their pairwise co-occurrence — the bits that
+        actually merge meaningfully into someone else's library. Cover
+        labels and per-asset tag reviews stay in the regular export, which
+        is meant for backing up your own DB rather than cross-pollination.
+        """
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Shared Tag Pool", "tag_pool.json",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        data = self._queries.export_cooccurrence_pool()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            QMessageBox.critical(self, "Export Failed", str(e))
+            return
+        QMessageBox.information(
+            self, "Pool Exported",
+            f"{len(data['tags'])} tag(s), {len(data['cooccurrence'])} "
+            "co-occurrence pair(s) exported.\n\n"
+            "Send the file to a friend; they import it via Tools → "
+            "Import Shared Tag Pool. Counts add up cumulatively."
+        )
+
+    def _on_import_pool(self):
+        """Merge a friend's exported pool into the local DB. Cumulative."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Shared Tag Pool", "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Import Failed", str(e))
+            return
+        result = self._queries.import_cooccurrence_pool(data)
+        if "error" in result:
+            QMessageBox.critical(self, "Wrong File Type", result["error"])
+            return
+        if result.get("already_imported"):
+            QMessageBox.information(
+                self, "Already Imported",
+                "This exact pool export was imported before — no changes.\n\n"
+                f"  Export id: {result['export_id']}\n"
+                f"  Previously: {result['tags_added']} tags / "
+                f"{result['pairs_merged']} pairs\n\n"
+                "Ask the friend to re-export — the new file gets a fresh id "
+                "and will merge cleanly."
+            )
+            return
+        self._sidebar.refresh()
+        QMessageBox.information(
+            self, "Pool Imported",
+            f"New tags created: {result['tags_added']}\n"
+            f"Co-occurrence pairs merged: {result['pairs_merged']}\n\n"
+            "Counts for tags you already had increase additively. "
+            "New tag suggestions will reflect the merged pool on next import."
+        )
+
+    def _on_crawl_training(self):
+        """Walk a user-chosen folder and harvest tag co-occurrence signals.
+
+        Uses the existing `tag_cooccurrence` table so the autotag pipeline
+        learns from the on-disk layout (folder names, archive names) without
+        needing the user to manually label every asset.
+        """
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose a folder to crawl for training signals", ""
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        reply = QMessageBox.question(
+            self,
+            "Crawl for training signals?",
+            f"Walk every supported asset under:\n  {root}\n\n"
+            "Filename + folder tokens get added to the autotag co-occurrence "
+            "table. Source files are NOT modified.\n\n"
+            "Junk files (.lnk, .ini, .txt, version markers) are skipped.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        from vrc_organizer.tools.training_crawler import crawl_directory
+        self._status_label.setText(f"Crawling {root} for training signals...")
+        QApplication.processEvents()
+        try:
+            summary = crawl_directory(self._queries, root)
+        except Exception as e:
+            QMessageBox.critical(self, "Crawl Failed", str(e))
+            self._status_label.setText("Crawl failed.")
+            return
+        self._sidebar.refresh()
+        self._model.refresh()
+        QMessageBox.information(
+            self,
+            "Crawl Complete",
+            f"Files seen: {summary['files']}\n"
+            f"Archives opened (pathnames + readmes mined): "
+            f"{summary.get('archives_opened', 0)}\n"
+            f"Tokens collected: {summary['tokens']}\n"
+            f"Tag-pair signals written: {summary['pairs_written']}\n\n"
+            "These feed into tag suggestions on next import."
+        )
+        self._status_label.setText(
+            f"Crawl complete — {summary['pairs_written']} pairs written"
+        )
+
     def _on_purge_cache(self):
-        """Purge thumbnail cache and extracted asset packages."""
+        """Debug-grade purge: wipes thumbnails, extracted packages, AND the
+        DB rows for assets/tags/labels/scan results. User explicitly asked
+        for this to be a full reset (not just cache)."""
         thumb_dir = self._app.thumb_cache_dir
         library_str = self._queries.get_setting("library_dir", "")
         library_dir = Path(library_str) if library_str else (
@@ -1105,14 +1412,19 @@ class MainWindow(QMainWindow):
             elif lib_size >= 1_000:
                 lib_size_str += f" ({lib_size / 1_000:.0f} KB)"
 
+        # Always offer the nuke option, even with zero cache items — assets
+        # in the DB still want clearing in debug mode.
+        asset_total = self._model.rowCount() if hasattr(self, "_model") else 0
         reply = QMessageBox.warning(
-            self, "Purge Cache & Packages",
-            f"This will permanently delete:\n\n"
+            self, "Purge Library (DEBUG)",
+            "This is a full reset and CANNOT be undone:\n\n"
             f"  • {thumb_size_str} from thumbnail cache\n"
-            f"  • {lib_size_str} from extracted packages\n\n"
-            f"Thumbnails will regenerate on next browse.\n"
-            f"Extracted packages will be re-extracted if needed.\n\n"
-            f"Continue?",
+            f"  • {lib_size_str} from extracted packages\n"
+            f"  • {asset_total} asset card(s), all tags, labels, "
+            f"scan results, and tag co-occurrence rows from the DB\n\n"
+            "Source files on disk are NOT touched.\n"
+            "Default tag set will be re-seeded on next launch.\n\n"
+            "Continue?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
@@ -1157,11 +1469,24 @@ class MainWindow(QMainWindow):
                 f"Purged {purged_thumbs} thumbnail(s) and {purged_libs} package(s)."
             )
 
-        # Reset thumb state for all assets so they regenerate
-        self._queries.reset_all_thumbs_pending()
+        # Debug nuke: wipe DB-side state too. After this the library is
+        # empty and the user can re-import from scratch.
+        db_counts = self._queries.hard_purge_all()
+        # Re-seed default genre/avatar tags so the UI has something to bind to.
+        self._seed_default_tags()
         QPixmapCache.clear()
+        self._model._pixmap_cache.clear()
         self._model.refresh()
         self._sidebar.refresh()
+        self._inspector.show_empty()
+
+        QMessageBox.information(
+            self, "Purge complete",
+            "Wiped:\n  • "
+            + "\n  • ".join(f"{n} {k}" for k, n in db_counts.items() if n)
+            + f"\n  • {purged_thumbs} cached thumbnail(s)"
+            + f"\n  • {purged_libs} extracted package(s)"
+        )
 
     def _on_toggle_theme(self):
         self._theme.toggle()

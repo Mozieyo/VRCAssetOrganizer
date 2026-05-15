@@ -34,10 +34,23 @@ class ThumbWorker(BaseWorker):
 
             self.signals.status.emit(f"Thumbnail: {asset.filename}")
 
-            # Check if user labeled a cover image for this asset
+            # Check if user labeled a cover image for this asset.
+            # '__cached__' is a sentinel from the labeler meaning "the
+            # asset has no archive images; keep the existing cached thumb",
+            # so we leave it alone (just promote state back to 'ready').
             cover_label = self._queries.get_cover_label(asset.id)
-            if cover_label:
+            if cover_label == "__cached__":
+                if asset.thumbnail and Path(asset.thumbnail).exists():
+                    self._queries.update_thumbnail(asset.id, Path(asset.thumbnail), "ready")
+                    continue
+                data = self._hunt_thumb(asset.filepath, asset.filetype)
+            elif cover_label:
                 data = self._extract_labeled_cover(asset.filepath, asset.filetype, cover_label)
+                # Labeled entry not retrievable (file moved, archive changed,
+                # path mismatch) — fall back to the auto hunt instead of
+                # leaving the asset thumbnail-less.
+                if not data:
+                    data = self._hunt_thumb(asset.filepath, asset.filetype)
             else:
                 data = self._hunt_thumb(asset.filepath, asset.filetype)
 
@@ -52,7 +65,9 @@ class ThumbWorker(BaseWorker):
                 except Exception:
                     self._queries.update_thumbnail(asset.id, None, "error")
             else:
-                self._queries.update_thumbnail(asset.id, None, "error")
+                # Preserve any existing thumbnail path so the previous
+                # image keeps rendering instead of going blank.
+                self._queries.update_thumbnail(asset.id, asset.thumbnail, "error")
 
         return found_ids
 
@@ -150,7 +165,7 @@ class ThumbWorker(BaseWorker):
             size = info.file_size
 
             # Direct images
-            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
                 if size < MAX_THUMB_SOURCE:
                     score = _thumb_score(name, size)
                     if score > best_score:
@@ -215,7 +230,7 @@ class ThumbWorker(BaseWorker):
                     continue
                 name = member.name
                 size = member.size
-                if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
                     continue
                 if size > MAX_THUMB_SOURCE:
                     continue
@@ -253,7 +268,7 @@ class ThumbWorker(BaseWorker):
                         continue
                     name = info.filename
                     size = info.file_size
-                    if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".psd")):
                         continue
                     if size > MAX_THUMB_SOURCE:
                         continue

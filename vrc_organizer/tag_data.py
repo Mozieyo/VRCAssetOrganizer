@@ -301,31 +301,48 @@ WORD_TO_TAG: dict[str, str] = {
     "gimmick": "Gimmick", "ギミック": "Gimmick",
     "facetracking": "Face Tracking", "facetrack": "Face Tracking", "ft": "Face Tracking",
     "フェイストラッキング": "Face Tracking", "フェイスト": "Face Tracking",
-    "physbone": "PhysBone", "physbones": "PhysBone", "フィズボーン": "PhysBone", "揺れ物": "PhysBone",
+    # PhysBone / liltoon / poiyomi / VRCFury / Modular Avatar / Toggle /
+    # BlendShape entries removed (2026-05-16): tech "givens" that every
+    # modern VRChat asset uses, not user-selectable attributes. They
+    # inflated the tag noise floor.
     "mmd": "MMD", "ミクミク": "MMD",
     "quest": "Quest", "クエスト": "Quest", "quest対応": "Quest",
     "pconly": "PC", "PC専用": "PC",
     "addon": "Add-on", "追加": "Add-on", "拡張": "Add-on",
     "改変": "Modification",
     "nsfw": "NSFW", "r18": "NSFW", "r-18": "NSFW",
-    # Penetration shader systems — VRChat NSFW context
+    # Penetration shader systems — kept; this is a content warning.
     "dps": "NSFW", "tps": "NSFW", "sps": "NSFW",
-    # Modern VRChat tooling — universally referenced in modern asset bundles
-    "vrcfury": "VRCFury", "vrcf": "VRCFury",
-    "modularavatar": "Modular Avatar", "modular": "Modular Avatar",
-    "toggle": "Toggle", "トグル": "Toggle", "toggles": "Toggle",
-    "blendshape": "BlendShape", "blendshapes": "BlendShape",
-    "ブレンドシェイプ": "BlendShape", "シェイプキー": "BlendShape",
-    # Common shader names
-    "liltoon": "lilToon",
-    "poiyomi": "Poiyomi",
-    # Discovery / aesthetic attributes
     "kawaii": "Cute", "かわいい": "Cute", "cute": "Cute", "可愛い": "Cute",
     "mascot": "Mascot", "マスコット": "Mascot",
 }
 
+
+# Implicit creator inference — when an asset matches an avatar, attach the
+# creator as a separate tag. Keeps creator-as-tag usable without manual
+# maintenance. (Add more pairs as you discover them; the tag review UI will
+# eventually let you extend this.)
+CREATOR_BY_AVATAR: dict[str, str] = {
+    "Mamehinata": "MOCHIYAMA",
+    "Kipfel": "MOCHIYAMA",
+    "Manuka": "WASABI",
+    "Mochi": "WASABI",
+    "Selestia": "Magenta",
+    "Shinra": "DeerStudio",
+    "Lime": "Sleepy",
+    "Lunya": "Sleepy",
+}
+
 # ── Canonical genre names (single source of truth) ──
-GENRE_NAMES: list[str] = ["Avatar Base", "Outfit & Acce", "Gimmick", "Tools"]
+GENRE_NAMES: list[str] = ["Avatar Base", "Outfit", "Accessory", "Gimmick", "Tools"]
+# Legacy genre names that should migrate into the new taxonomy. Imports from
+# older DBs detect these and rewrite them at startup.
+LEGACY_GENRE_REMAP: dict[str, str] = {
+    "Outfit & Acce": "Outfit",
+    "Outfit & Accessory": "Outfit",
+    "Outfit and Accessory": "Outfit",
+    "Outfit_Acce": "Outfit",
+}
 
 # ── All avatar names as a set for O(1) membership ──
 ALL_AVATAR_NAMES: set[str] = set(TOP_AVATARS)

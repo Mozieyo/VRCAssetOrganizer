@@ -13,7 +13,8 @@ from vrc_organizer.database.queries import Queries
 class AssetContextMenu(QMenu):
     open_in = Signal(str, Path, int)    # tool_name, filepath, asset_id
     add_tag = Signal(int)                # asset_id
-    delete_asset = Signal(int)           # asset_id
+    delete_asset = Signal(int)           # asset_id — remove from library only
+    delete_file = Signal(int)            # asset_id — recycle the file too
     rescan = Signal(int)                 # asset_id
 
     def __init__(self, asset_id: int, asset_filename: str,
@@ -59,7 +60,14 @@ class AssetContextMenu(QMenu):
         self.addSeparator()
         self.addAction(self._action("Re-scan", lambda: self.rescan.emit(self._asset_id)))
         self.addSeparator()
-        self.addAction(self._action("Delete", lambda: self.delete_asset.emit(self._asset_id)))
+        self.addAction(self._action(
+            "Remove from Library",
+            lambda: self.delete_asset.emit(self._asset_id),
+        ))
+        self.addAction(self._action(
+            "Delete File from Disk…",
+            lambda: self.delete_file.emit(self._asset_id),
+        ))
 
     def _on_reveal_in_explorer(self):
         subprocess.run(['explorer', '/select,', str(self._filepath)])

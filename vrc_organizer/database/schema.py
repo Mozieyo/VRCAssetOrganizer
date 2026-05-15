@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 CREATE_STATEMENTS = [
     """
@@ -87,6 +87,14 @@ CREATE_STATEMENTS = [
         tag_b_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
         count    INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (tag_a_id, tag_b_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS imported_pools (
+        export_id    TEXT PRIMARY KEY,
+        imported_at  REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+        tags_added   INTEGER NOT NULL DEFAULT 0,
+        pairs_merged INTEGER NOT NULL DEFAULT 0
     )
     """,
 ]
@@ -212,6 +220,19 @@ def init_schema(conn: sqlite3.Connection):
             except sqlite3.OperationalError:
                 # legacy table doesn't exist on this install — nothing to migrate
                 pass
+
+        # Migration: v9 → v10 — track which shared-tag-pool exports have
+        # already been imported so re-importing the same JSON 100 times
+        # doesn't multiply co-occurrence counts 100×.
+        if current < 10:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS imported_pools (
+                    export_id TEXT PRIMARY KEY,
+                    imported_at REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                    tags_added INTEGER NOT NULL DEFAULT 0,
+                    pairs_merged INTEGER NOT NULL DEFAULT 0
+                )"""
+            )
 
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
