@@ -5,7 +5,7 @@ from typing import Optional
 
 from PySide6.QtCore import (
     Qt, QAbstractListModel, QModelIndex, Signal, QSize, QRect, QPoint, QTimer,
-    QItemSelectionModel, QEvent,
+    QItemSelectionModel, QEvent, QSettings,
 )
 from PySide6.QtGui import (
     QPainter, QPixmap, QColor, QFont, QPen, QBrush, QFontMetrics, QPalette,
@@ -16,10 +16,34 @@ from PySide6.QtWidgets import (
 )
 
 from vrc_organizer.database.queries import Queries
+from vrc_organizer.romaji import has_japanese, to_romaji
+
+
+# Cached "show romaji" flag — paintEvent runs once per visible card per
+# scroll/redraw, and re-instantiating QSettings each time burned measurable
+# CPU on libraries of a few hundred assets. The toggle in the View menu
+# calls set_show_romaji_cached() to invalidate this.
+_SHOW_ROMAJI_CACHE: bool | None = None
+
+
+def _show_romaji_cached() -> bool:
+    global _SHOW_ROMAJI_CACHE
+    if _SHOW_ROMAJI_CACHE is None:
+        _SHOW_ROMAJI_CACHE = bool(QSettings().value("show_romaji", True, type=bool))
+    return _SHOW_ROMAJI_CACHE
+
+
+def set_show_romaji_cached(value: bool) -> None:
+    global _SHOW_ROMAJI_CACHE
+    _SHOW_ROMAJI_CACHE = bool(value)
 
 PAGE_SIZE = 100
 THUMB_SIZE = 192
-MAX_CACHED_THUMBS = 200
+# Pixmap cache cap: each scaled QPixmap is roughly card_w^2 * 4 bytes
+# (~160 KB at default density). 100 entries ≈ 16 MB. The visible window
+# plus buffer is usually 50-80 cards; a 100-entry cap keeps scroll-back
+# snappy without holding a large pile of off-screen pixmaps.
+MAX_CACHED_THUMBS = 100
 CARD_PADDING = 8
 LABEL_HEIGHT = 44  # taller label band so a 2-line (romaji + name) layout fits without clipping
 
@@ -62,32 +86,72 @@ class AssetListModel(QAbstractListModel):
         return None
 
     def canFetchMore(self, index):
-        return len(self._ids) < self._total
+        # refresh() now loads every matching id up-front, so the view never
+        # needs to paginate. Kept as a no-op for any external caller still
+        # checking the standard QAbstractListModel pagination contract.
+        return False
 
     def fetchMore(self, index):
-        new_ids = self._queries.list_assets(
-            offset=len(self._ids), limit=PAGE_SIZE,
-            filetypes=self._filetypes, or_tag_ids=self._or_tag_ids,
-            and_tag_ids=self._and_tag_ids,
-            search_query=self._search, sort=self._sort,
-        )
-        if new_ids:
-            start = len(self._ids)
-            self.beginInsertRows(QModelIndex(), start, start + len(new_ids) - 1)
-            self._ids.extend(a.id for a in new_ids)
-            self.endInsertRows()
+        return
 
     def refresh(self):
+        # Note: _pixmap_cache and _asset_cache are keyed by stable asset_id,
+        # not by row position. A filter change reorders/shrinks the visible
+        # set but doesn't invalidate the cached entries — so we keep them
+        # and let the bounded eviction (MAX_CACHED_THUMBS) manage memory.
+        # This makes "clear filters → show everything" near-instant on
+        # libraries the user has already been scrolling through.
+        #
+        # We pull every matching id in one SQL round trip instead of
+        # paginating PAGE_SIZE at a time via fetchMore — on libraries with
+        # thousands of assets the old approach issued ~50 LIMIT/OFFSET
+        # queries per filter change.
         self.beginResetModel()
-        self._ids.clear()
-        self._pixmap_cache.clear()
-        self._asset_cache = {}
-        self._total = self._queries.count_assets(
+        self._ids = self._queries.list_asset_ids(
             filetypes=self._filetypes, or_tag_ids=self._or_tag_ids,
             and_tag_ids=self._and_tag_ids, search_query=self._search,
+            sort=self._sort,
         )
+        self._total = len(self._ids)
+        # Prime the per-asset cache for any ids that aren't already there.
+        # Without this, _refresh_card_data in the view would trigger one
+        # SELECT per card the first time around — a fresh "show all 2000"
+        # used to fan out into 2000 round trips.
+        missing = [aid for aid in self._ids if aid not in self._asset_cache]
+        if missing:
+            self._asset_cache.update(self._queries.get_assets_by_ids(missing))
         self.endResetModel()
         self.data_changed_full.emit()
+
+    def invalidate_caches(self):
+        """Drop the pixmap + asset caches. Call when an asset's filename,
+        thumbnail, or other field changes, OR when the thumb pixel size
+        is being changed and we want fresh resolutions everywhere."""
+        self._pixmap_cache.clear()
+        self._asset_cache = {}
+
+    def refresh_asset(self, asset_id: int):
+        """Mark a single asset's cached data as stale and tell the view
+        to redraw just that row. Use this when an asset's row data
+        changed (thumbnail, notes, tag set without filter implications)
+        but its position in the filtered set is stable. Much cheaper
+        than refresh() — no SQL count/select runs."""
+        self._asset_cache.pop(asset_id, None)
+        self._pixmap_cache.pop(asset_id, None)
+        try:
+            row = self._ids.index(asset_id)
+        except ValueError:
+            # Asset isn't in the current filtered set; nothing to redraw.
+            return
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [])
+
+    def refresh_assets(self, asset_ids: list[int]):
+        """Bulk variant of refresh_asset for batches like thumb worker
+        completions. Only the rows that are actually in the current
+        result set get their dataChanged signal."""
+        for aid in asset_ids:
+            self.refresh_asset(aid)
 
     def set_filter(self, filetypes: Optional[list[str]] = None,
                    or_tag_ids: Optional[list[int]] = None,
@@ -161,6 +225,18 @@ class AssetCard(QFrame):
     @property
     def asset_id(self) -> int:
         return self._asset_id
+
+    def rebind(self, asset_id: int):
+        """Reassign this card to a different asset. Used by the view's
+        recycler so a filter change doesn't have to destroy and recreate
+        QFrames — the same widget is repointed at a new row instead."""
+        if asset_id == self._asset_id:
+            return
+        self._asset_id = asset_id
+        self._pixmap = None
+        self._filename = ""
+        self._selected = False
+        self.update()
 
     def set_data(self, filename: str, pixmap: QPixmap | None, tooltip: str = ""):
         if filename != self._filename or pixmap is not self._pixmap:
@@ -265,10 +341,7 @@ class AssetCard(QFrame):
                 p.drawText(thumb_rect, Qt.AlignCenter, "?")
 
             # Filename line + optional romaji line ("furigana" style).
-            from vrc_organizer.romaji import has_japanese, to_romaji
-            from PySide6.QtCore import QSettings
-            show_romaji = bool(QSettings().value("show_romaji", True, type=bool))
-            jp = show_romaji and has_japanese(self._filename)
+            jp = _show_romaji_cached() and has_japanese(self._filename)
 
             f = QFont()
             f.setPixelSize(11)
@@ -433,17 +506,35 @@ class AssetListView(QScrollArea):
     SPACING = 10
     MIN_CARD_W = 80
     MAX_CARD_W = 360
+    # How many extra rows of cards to keep rendered above/below the
+    # viewport. A small buffer hides fly-in latency when the user scrolls;
+    # too large and we lose the virtualization win.
+    BUFFER_ROWS = 3
+    # Hard cap on the QFrame pool, regardless of library size. Bigger than
+    # any reasonable viewport + buffer can need, but tiny compared to
+    # holding one widget per asset.
+    POOL_CAP = 200
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._model: AssetListModel | None = None
+        # Pool of card widgets we recycle. `_row_to_card` is the active
+        # binding; `_free_cards` holds the leftover pool entries waiting
+        # to be assigned to a row. Together they always partition the
+        # entries of self._cards — if a card is hidden but not in either
+        # one, _update_visible_window can't find it and we leak widgets
+        # while the grid renders empty.
         self._cards: list[AssetCard] = []
+        self._row_to_card: dict[int, AssetCard] = {}
+        self._free_cards: list[AssetCard] = []
         self._selected: set[int] = set()
         self._pre_marquee_selection: set[int] = set()
         self._last_click_aid: int | None = None
         self._density = 5
         self._card_w = self.MIN_CARD_W
         self._card_h = self.MIN_CARD_W + LABEL_HEIGHT
+        self._cols = 1
+        self._outer = self.SPACING
         self._relayout_pending = False
         self._show_empty_text = True
 
@@ -457,6 +548,12 @@ class AssetListView(QScrollArea):
         self._container = _GridContainer(self)
         self._container.marquee_changed.connect(self._apply_marquee)
         self.setWidget(self._container)
+
+        # Scroll-driven virtualization: every scroll tick reconsiders
+        # which rows fall inside the viewport and rebinds cards as needed.
+        self.verticalScrollBar().valueChanged.connect(
+            lambda _: self._update_visible_window()
+        )
 
     # ── Model wiring ────────────────────────────────────────────────
 
@@ -482,57 +579,159 @@ class AssetListView(QScrollArea):
     def _on_rows_changed(self, *args):
         self._rebuild()
 
-    def _on_data_changed(self, *args):
+    def _on_data_changed(self, topLeft=None, bottomRight=None, *_):
+        # Single-row change (refresh_asset path): rebind just that card
+        # if it's currently visible. Multi-row falls back to refreshing
+        # every bound card.
+        if (topLeft is not None and bottomRight is not None
+                and topLeft.row() == bottomRight.row()):
+            row = topLeft.row()
+            card = self._row_to_card.get(row)
+            if card is not None and self._model is not None:
+                aid = self._model.get_asset_id(row)
+                card.rebind(aid)
+                filename = self._model._get_filename(aid)
+                pix = self._model._get_thumb(aid)
+                tooltip = self._model._get_tooltip(aid)
+                card.set_data(filename, pix, tooltip)
+                card.set_selected(aid in self._selected)
+            return
         self._refresh_card_data()
 
     def _ensure_all_rows_loaded(self):
-        if self._model is None:
-            return
-        # Hard-cap to avoid runaway loops if total is huge.
-        guard = 0
-        while self._model.canFetchMore(QModelIndex()) and guard < 50:
-            self._model.fetchMore(QModelIndex())
-            guard += 1
+        # No-op kept for source compatibility — the model now loads every
+        # id in refresh() rather than paginating via fetchMore.
+        return
 
     def _rebuild(self):
-        # Guard against re-entrancy: fetchMore inside _ensure_all_rows_loaded
-        # fires rowsInserted, which would otherwise schedule another rebuild
-        # mid-flight.
+        # Filter changed / model reset / rows added/removed. We do NOT
+        # clear _row_to_card — the cards bound to visible rows are still
+        # useful; we just need to rebind their asset_id since model._ids
+        # may have reshuffled. _update_visible_window picks that up by
+        # checking each kept binding's asset_id against the current row.
         if getattr(self, "_rebuilding", False):
             return
         self._rebuilding = True
         try:
-            for c in self._cards:
-                c.setParent(None)
-                c.deleteLater()
-            self._cards.clear()
             if self._model is None:
+                for c in self._cards:
+                    c.setParent(None)
+                    c.deleteLater()
+                self._cards.clear()
+                self._row_to_card.clear()
+                self._free_cards.clear()
                 self._schedule_relayout()
                 return
-            self._ensure_all_rows_loaded()
-            for row in range(self._model.rowCount()):
-                aid = self._model.get_asset_id(row)
-                card = AssetCard(aid, self._container)
-                card.clicked.connect(self._on_card_clicked)
-                card.double_clicked.connect(self._on_card_double_clicked)
-                card.context_menu.connect(self._on_card_context_menu)
-                card.show()
-                self._cards.append(card)
-            self._refresh_card_data()
+            # Drop bindings for rows that no longer exist (model shrank).
+            # Move the freed cards into the free pool so the allocator
+            # can reuse them on the next visible-window update.
+            n = self._model.rowCount()
+            for row in list(self._row_to_card.keys()):
+                if row >= n:
+                    card = self._row_to_card.pop(row)
+                    if card.isVisible():
+                        card.hide()
+                    self._free_cards.append(card)
             self._schedule_relayout()
         finally:
             self._rebuilding = False
 
+    def _make_card(self) -> "AssetCard":
+        card = AssetCard(0, self._container)
+        card.clicked.connect(self._on_card_clicked)
+        card.double_clicked.connect(self._on_card_double_clicked)
+        card.context_menu.connect(self._on_card_context_menu)
+        return card
+
     def _refresh_card_data(self):
+        """Pull fresh filename/pixmap/tooltip into every currently-bound
+        card. Called when the data of the underlying assets changed but
+        the row mapping didn't (e.g. background thumbnail worker writes
+        a new path)."""
         if self._model is None:
             return
-        for i, card in enumerate(self._cards):
+        for row, card in self._row_to_card.items():
             aid = card.asset_id
-            idx = self._model.index(i, 0) if i < self._model.rowCount() else None
             filename = self._model._get_filename(aid)
             pix = self._model._get_thumb(aid)
             tooltip = self._model._get_tooltip(aid)
             card.set_data(filename, pix, tooltip)
+
+    def _bind_card_to_row(self, card: "AssetCard", row: int):
+        """Point a card at a model row, set its geometry and data, and
+        ensure it's visible. Called from the virtualization update."""
+        aid = self._model.get_asset_id(row)
+        card.rebind(aid)
+        grid_row, grid_col = divmod(row, max(1, self._cols))
+        x = self._outer + grid_col * (self._card_w + self.SPACING)
+        y = self.SPACING + grid_row * (self._card_h + self.SPACING)
+        card.setGeometry(x, y, self._card_w, self._card_h)
+        filename = self._model._get_filename(aid)
+        pix = self._model._get_thumb(aid)
+        tooltip = self._model._get_tooltip(aid)
+        card.set_data(filename, pix, tooltip)
+        card.set_selected(aid in self._selected)
+        if not card.isVisible():
+            card.show()
+
+    def _visible_row_range(self) -> tuple[int, int]:
+        """Return [first_idx, last_idx) of model rows that should currently
+        have a card bound to them (visible viewport + a few buffer rows).
+        Uses integer math against scroll position and card height."""
+        if self._cols <= 0 or self._card_h <= 0 or self._model is None:
+            return 0, 0
+        row_h = self._card_h + self.SPACING
+        scroll_y = self.verticalScrollBar().value()
+        viewport_h = self.viewport().height()
+        first_grid_row = max(0, (scroll_y - self.SPACING) // row_h - self.BUFFER_ROWS)
+        last_grid_row = (scroll_y + viewport_h - self.SPACING) // row_h + self.BUFFER_ROWS
+        n = self._model.rowCount()
+        first_idx = int(first_grid_row * self._cols)
+        last_idx = int(min(n, (last_grid_row + 1) * self._cols))
+        return first_idx, max(first_idx, last_idx)
+
+    def _update_visible_window(self):
+        """Rebind cards in the pool so every row in the visible window has
+        exactly one. Anything that fell out of the window gets recycled."""
+        if self._model is None or self._cols <= 0:
+            return
+        first, last = self._visible_row_range()
+        needed_rows = set(range(first, last))
+
+        # Cards whose row scrolled out of the visible window: hide and
+        # push onto the free pool for reuse below.
+        for row in list(self._row_to_card.keys()):
+            if row not in needed_rows:
+                card = self._row_to_card.pop(row)
+                if card.isVisible():
+                    card.hide()
+                self._free_cards.append(card)
+
+        # Bind cards to every visible row. If a binding already exists
+        # but the asset_id no longer matches (filter switched the ids
+        # under us while preserving row numbers), rebind in place.
+        for row in needed_rows:
+            existing = self._row_to_card.get(row)
+            if existing is not None:
+                expected_aid = self._model.get_asset_id(row)
+                if existing.asset_id != expected_aid:
+                    self._bind_card_to_row(existing, row)
+                continue
+            if self._free_cards:
+                card = self._free_cards.pop()
+            elif len(self._cards) < self.POOL_CAP:
+                card = self._make_card()
+                self._cards.append(card)
+            else:
+                # Pool exhausted. Means BUFFER_ROWS * cols is too big for
+                # POOL_CAP — practically impossible at sensible densities.
+                break
+            self._row_to_card[row] = card
+            self._bind_card_to_row(card, row)
+
+        # Keep the marquee overlay on top of any newly-shown cards.
+        if hasattr(self._container, "overlay"):
+            self._container.overlay.raise_()
 
     # ── Density + layout ────────────────────────────────────────────
 
@@ -565,51 +764,53 @@ class AssetListView(QScrollArea):
         min_card = self._target_min_card_w()
         spacing = self.SPACING
 
-        # Available row width = view_w - 2*outer_margin. Each card consumes
-        # card_w + spacing in horizontal flow. Outer margin == spacing for
-        # symmetry, so a row fits N cards when:
+        # How many cards fit per row at the current density.
         #   2*spacing + N*card_w + (N-1)*spacing <= view_w
         #   N*(card_w + spacing) <= view_w - spacing
         cols = max(1, (view_w - spacing) // (min_card + spacing))
 
-        # Grow each card to fill the row exactly.
         usable = view_w - (cols + 1) * spacing
         card_w = max(min_card, usable // cols)
         if card_w > self.MAX_CARD_W:
             card_w = self.MAX_CARD_W
-        card_h = card_w + LABEL_HEIGHT  # square thumb area + label band
+        card_h = card_w + LABEL_HEIGHT
 
+        size_changed = (card_w != self._card_w or card_h != self._card_h)
+        cols_changed = (cols != self._cols)
         self._card_w = card_w
         self._card_h = card_h
+        self._cols = cols
 
-        # Tell the model the new pixmap target so cached thumbnails render at
-        # the right resolution. Only triggers a cache clear when the size
-        # actually changes (model handles that).
         if self._model is not None:
             self._model.set_thumb_size(card_w - 12)
 
-        # Center the row: actual content width = cols*card_w + (cols-1)*spacing.
-        # Outer left/right margin is half the remaining space, but never less
-        # than the configured spacing.
+        # Center the row horizontally.
         used = cols * card_w + (cols - 1) * spacing
-        outer = max(spacing, (view_w - used) // 2)
+        self._outer = max(spacing, (view_w - used) // 2)
 
-        # Place each card.
-        n = len(self._cards)
-        for i, card in enumerate(self._cards):
-            r = i // cols
-            c = i % cols
-            x = outer + c * (card_w + spacing)
-            y = spacing + r * (card_h + spacing)
-            card.setGeometry(x, y, card_w, card_h)
-
-        # Resize container so the scroll area knows how tall content is.
-        rows = (n + cols - 1) // cols if n else 0
+        # ── Virtual container height ──────────────────────────
+        # The container must report the FULL height every row would
+        # occupy if rendered, so the scroll bar accurately covers the
+        # whole result set even though only a slice has live widgets.
+        n_total = self._model.rowCount() if self._model is not None else 0
+        rows = (n_total + cols - 1) // cols if n_total else 0
         total_h = spacing + rows * (card_h + spacing) if rows else 0
-        self._container.setMinimumHeight(max(total_h, 0))
+        self._container.setMinimumHeight(total_h)
         self._container.resize(view_w, max(total_h, self.viewport().height()))
-        # Re-raise the marquee overlay above the cards every layout pass,
-        # otherwise a freshly-placed card draws on top of it.
+
+        # If card size or column count changed, every currently-bound card
+        # has a stale geometry — drop bindings so they're recomputed.
+        # Cards go to the free pool, not into limbo: _update_visible_window
+        # would otherwise be unable to find them and would hit POOL_CAP
+        # without rendering anything.
+        if size_changed or cols_changed:
+            for card in self._row_to_card.values():
+                card.hide()
+                self._free_cards.append(card)
+            self._row_to_card.clear()
+
+        self._update_visible_window()
+
         if hasattr(self._container, "overlay"):
             self._container.overlay.setGeometry(
                 0, 0, self._container.width(), self._container.height()
@@ -618,6 +819,15 @@ class AssetListView(QScrollArea):
         self.viewport().update()
 
     # ── Selection ───────────────────────────────────────────────────
+
+    def _model_ids(self) -> list[int]:
+        """All asset ids in model order. Replaces the old habit of walking
+        self._cards — under virtualization the pool only contains the
+        visible slice, so selection range and marquee logic now read row
+        order straight from the model."""
+        if self._model is None:
+            return []
+        return list(self._model._ids)
 
     def _on_card_clicked(self, asset_id: int, modifiers):
         ctrl = bool(modifiers & Qt.ControlModifier)
@@ -628,8 +838,8 @@ class AssetListView(QScrollArea):
             else:
                 self._selected.add(asset_id)
         elif shift and self._last_click_aid is not None:
-            # Range select from last to this
-            ids = [c.asset_id for c in self._cards]
+            # Range select from last clicked to this, using model row order
+            ids = self._model_ids()
             try:
                 a = ids.index(self._last_click_aid)
                 b = ids.index(asset_id)
@@ -664,11 +874,15 @@ class AssetListView(QScrollArea):
         self.customContextMenuRequested.emit(self.viewport().mapFromGlobal(global_pos))
 
     def _sync_card_selection(self):
-        for card in self._cards:
+        # Only push state into cards currently bound to a row — recycled
+        # cards in the free pool have a stale asset_id from their last
+        # binding and shouldn't reflect selection state.
+        for card in self._row_to_card.values():
             card.set_selected(card.asset_id in self._selected)
 
     def selected_asset_ids(self) -> list[int]:
-        return [c.asset_id for c in self._cards if c.asset_id in self._selected]
+        # Order by model row so callers get deterministic ordering.
+        return [aid for aid in self._model_ids() if aid in self._selected]
 
     def current_asset_id(self) -> int | None:
         return self._last_click_aid if self._last_click_aid in self._selected else (
@@ -676,8 +890,11 @@ class AssetListView(QScrollArea):
         )
 
     def select_asset_ids(self, asset_ids: list[int]):
-        target = set(asset_ids)
-        self._selected = {c.asset_id for c in self._cards if c.asset_id in target}
+        # Intersect with model ids — caller may pass ids not currently in
+        # the result set, which we don't want to "select" since they're
+        # invisible.
+        in_model = set(self._model_ids())
+        self._selected = set(asset_ids) & in_model
         if self._selected:
             self._last_click_aid = next(iter(self._selected))
         self._sync_card_selection()
@@ -705,10 +922,22 @@ class AssetListView(QScrollArea):
             base = self._pre_marquee_selection or set(self._selected)
             self._pre_marquee_selection = base
 
+        # Compute hits from the row grid rather than from card widgets —
+        # rows that scrolled out of the visible window have no card to
+        # intersect against, so a card-based hit test would miss any row
+        # the user dragged over but then scrolled past.
         hits: set[int] = set()
-        for card in self._cards:
-            if rect.intersects(card.geometry()):
-                hits.add(card.asset_id)
+        if self._model is not None and self._cols > 0:
+            n = self._model.rowCount()
+            card_w, card_h, sp = self._card_w, self._card_h, self.SPACING
+            row_h = card_h + sp
+            ids = self._model._ids
+            for row in range(n):
+                grid_row, grid_col = divmod(row, self._cols)
+                x = self._outer + grid_col * (card_w + sp)
+                y = sp + grid_row * row_h
+                if rect.intersects(QRect(x, y, card_w, card_h)):
+                    hits.add(ids[row])
         new_sel = base | hits
         if new_sel != self._selected:
             self._selected = new_sel
@@ -719,7 +948,7 @@ class AssetListView(QScrollArea):
             self._pre_marquee_selection = set()
 
     def select_all(self):
-        self._selected = {c.asset_id for c in self._cards}
+        self._selected = set(self._model_ids())
         self._sync_card_selection()
         self.selection_changed.emit()
 
@@ -779,7 +1008,11 @@ class AssetListView(QScrollArea):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if self._cards or not self._show_empty_text:
+        # Empty-state hint shows only when the model has zero rows. With
+        # virtualization, self._cards is the pool (typically non-empty
+        # after first paint) so we can't gate on that any more.
+        has_rows = self._model is not None and self._model.rowCount() > 0
+        if has_rows or not self._show_empty_text:
             return
         p = QPainter(self.viewport())
         try:

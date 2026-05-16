@@ -346,3 +346,16 @@ LEGACY_GENRE_REMAP: dict[str, str] = {
 
 # ── All avatar names as a set for O(1) membership ──
 ALL_AVATAR_NAMES: set[str] = set(TOP_AVATARS)
+
+# Color stamped on user-created avatar tags. Both the inspector and the sidebar
+# create avatars with this exact value, so we treat it as an additional avatar
+# discriminator: a tag is an "avatar" if its name is in ALL_AVATAR_NAMES OR
+# its color matches this constant. Without that second check, user-coined
+# avatars (e.g. niche creators not in TOP_AVATARS) land in the generic Tags
+# panel instead of the Avatars panel.
+AVATAR_TAG_COLOR: str = "#8b5cf6"
+
+
+def is_avatar_tag(name: str, color: str) -> bool:
+    """True if a tag should be treated as an avatar based on name or color."""
+    return name in ALL_AVATAR_NAMES or (color or "").lower() == AVATAR_TAG_COLOR

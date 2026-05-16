@@ -15,7 +15,7 @@ class ChipToggleButton(QPushButton):
         self._exclusive_group = exclusive_group
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(26)
+        self.setMinimumHeight(28)
         self._apply_style(False)
         self.toggled.connect(self._on_toggled)
 
@@ -34,36 +34,38 @@ class ChipToggleButton(QPushButton):
                         stop:0 #3b82f6, stop:1 #2563eb);
                     color: white; border: none;
                     border-radius: 12px; padding: 4px 12px;
-                    font-size: 11px; font-weight: 600;
+                    font-size: 12px; font-weight: 600;
                 }
                 QPushButton:hover { background: #1d4ed8; }
                 QPushButton:pressed { background: #1e40af; }
             """)
         elif self._is_dark():
+            # Bumped contrast: text is now #cbd5e1 (~AA on slate-800), inactive
+            # border lightened so chips don't disappear into the dark sidebar.
             self.setStyleSheet("""
                 QPushButton {
-                    background: #1e293b; color: #94a3b8;
-                    border: 1px solid #334155;
+                    background: #1e293b; color: #cbd5e1;
+                    border: 1px solid #475569;
                     border-radius: 12px; padding: 4px 12px;
-                    font-size: 11px;
+                    font-size: 12px; font-weight: 500;
                 }
                 QPushButton:hover {
-                    background: #334155; color: #e2e8f0;
-                    border-color: #475569;
+                    background: #334155; color: #f8fafc;
+                    border-color: #64748b;
                 }
                 QPushButton:pressed { background: #0f172a; }
             """)
         else:
             self.setStyleSheet("""
                 QPushButton {
-                    background: #f1f5f9; color: #475569;
-                    border: 1px solid #e2e8f0;
+                    background: #f8fafc; color: #1e293b;
+                    border: 1px solid #cbd5e1;
                     border-radius: 12px; padding: 4px 12px;
-                    font-size: 11px;
+                    font-size: 12px; font-weight: 500;
                 }
                 QPushButton:hover {
-                    background: #e2e8f0; color: #1e293b;
-                    border-color: #cbd5e1;
+                    background: #e2e8f0; color: #0f172a;
+                    border-color: #94a3b8;
                 }
                 QPushButton:pressed { background: #cbd5e1; }
             """)

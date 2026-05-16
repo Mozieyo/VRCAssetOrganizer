@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QSettings
 from PySide6.QtGui import QPixmap, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from vrc_organizer.database.queries import Queries
 from vrc_organizer.models.asset import Asset
+from vrc_organizer.romaji import has_japanese, to_romaji
 from vrc_organizer.tag_data import GENRE_NAMES, TAG_HIERARCHY
 from vrc_organizer.auto_tagger import suggest_tags
 
@@ -25,6 +26,9 @@ class TagLabelerDialog(QDialog):
 
     def __init__(self, queries: Queries, thumb_cache_dir: Path, parent=None):
         super().__init__(parent)
+        # See note in TagDialog: required to avoid leaking the dialog into
+        # MainWindow's child list every time it opens.
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self._queries = queries
         self._thumb_cache_dir = thumb_cache_dir
         self._assets: list[Asset] = []
@@ -34,6 +38,9 @@ class TagLabelerDialog(QDialog):
         self._orig_genre: int | None = None
         self._labeled = 0
         self._chips: list[tuple[QWidget, int, str]] = []  # (widget, tag_id, state)
+        # Undo stack: each entry is (asset_id, tag_ids_before_save). Pop on
+        # back; restore the asset's tags to exactly the saved snapshot.
+        self._history: list[tuple[int, set[int]]] = []
 
         self.setWindowTitle("Tag Review")
         self.setMinimumSize(700, 500)
@@ -51,7 +58,7 @@ class TagLabelerDialog(QDialog):
         self._progress_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         top.addWidget(self._progress_lbl)
         top.addStretch()
-        hints = QLabel("Space = save & next   ·   S = skip   ·   Esc = done")
+        hints = QLabel("Space = save & next   ·   S = skip   ·   Ctrl+Z = back   ·   Esc = done")
         hints.setStyleSheet("color: #475569; font-size: 11px;")
         top.addWidget(hints)
         root.addLayout(top)
@@ -152,6 +159,13 @@ class TagLabelerDialog(QDialog):
         # Bottom buttons
         btm = QHBoxLayout()
         btm.addStretch()
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setMinimumWidth(80)
+        self._back_btn.setAutoDefault(False)
+        self._back_btn.setToolTip("Re-review the previous asset (Ctrl+Z)")
+        self._back_btn.setEnabled(False)
+        self._back_btn.clicked.connect(self._undo)
+        btm.addWidget(self._back_btn)
         skip_btn = QPushButton("Skip")
         skip_btn.setMinimumWidth(80)
         skip_btn.setAutoDefault(False)
@@ -186,8 +200,6 @@ class TagLabelerDialog(QDialog):
         asset = self._assets[self._idx]
         self._progress_lbl.setText(f"{self._idx + 1} / {len(self._assets)}")
         self._filename.setText(asset.filename)
-        from vrc_organizer.romaji import has_japanese, to_romaji
-        from PySide6.QtCore import QSettings
         if QSettings().value("show_romaji", True, type=bool) and has_japanese(asset.filename):
             self._romaji_label.setText(to_romaji(asset.filename))
             self._romaji_label.setVisible(True)
@@ -489,6 +501,12 @@ class TagLabelerDialog(QDialog):
         if self._idx >= len(self._assets):
             return
         asset = self._assets[self._idx]
+        # Snapshot for undo BEFORE we mutate. Captures the literal set of
+        # tag ids assigned to this asset so _undo can restore it exactly.
+        before = {t[0] for t in self._queries.get_tags_for_asset(asset.id)}
+        self._history.append((asset.id, before))
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setEnabled(True)
         accepted, rejected, added = [], [], []
 
         for btn, tid, orig_state in list(self._chips):
@@ -545,7 +563,53 @@ class TagLabelerDialog(QDialog):
     def _skip(self):
         if self._idx >= len(self._assets):
             return
+        # Skips don't mutate the DB, so we don't need a history entry — but
+        # we still want Back to jump to the skipped asset so the user can
+        # change their mind. Push a None snapshot to mark "no DB rollback".
+        asset = self._assets[self._idx]
+        self._history.append((asset.id, set()))
+        # Mark as a skip-only entry by sentinel — second tuple slot is the
+        # set we'd restore TO, and an empty set on an asset that has tags
+        # would wipe them. Use a wrapper to keep skip distinct.
+        # Replace the just-pushed entry with the sentinel form:
+        self._history[-1] = (asset.id, None)
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setEnabled(True)
         self._next()
+
+    def _undo(self):
+        """Rewind to the previously-reviewed asset, restoring its tag set
+        for save entries and just re-showing for skip entries."""
+        if not self._history:
+            return
+        asset_id, before = self._history.pop()
+        if before is not None:
+            # Restore the exact pre-save tag set: remove anything currently
+            # on the asset that wasn't in `before`, and add back anything
+            # that was in `before` but isn't now.
+            current = {t[0] for t in self._queries.get_tags_for_asset(asset_id)}
+            for tid in current - before:
+                self._queries.remove_tag_from_asset(asset_id, tid)
+            for tid in before - current:
+                self._queries.add_tag_to_asset(asset_id, tid)
+            # Also drop the tag_label session row so the asset reappears as
+            # "needs labeling" — otherwise get_unlabeled_tag_assets would
+            # never offer it again.
+            self._queries.delete_tag_label(asset_id)
+            self._labeled = max(0, self._labeled - 1)
+
+        # Find the asset in the queue and jump to it; inject if missing.
+        for i, a in enumerate(self._assets):
+            if a.id == asset_id:
+                self._idx = i
+                self._show()
+                self._back_btn.setEnabled(bool(self._history))
+                return
+        asset = self._queries.get_asset(asset_id)
+        if asset is not None:
+            self._assets.insert(self._idx, asset)
+            self._show()
+        self._back_btn.setEnabled(bool(self._history))
 
     def _next(self):
         self._idx += 1
@@ -553,6 +617,8 @@ class TagLabelerDialog(QDialog):
             more = self._queries.get_unlabeled_tag_assets(limit=100)
             existing = {a.id for a in self._assets}
             self._assets.extend(a for a in more if a.id not in existing)
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setEnabled(bool(self._history))
         self._show()
 
     def _finish(self):
@@ -572,6 +638,8 @@ class TagLabelerDialog(QDialog):
             self._save()
         elif k == Qt.Key_S:
             self._skip()
+        elif k == Qt.Key_Z and e.modifiers() & Qt.ControlModifier:
+            self._undo()
         elif k == Qt.Key_Escape:
             self._finish()
         else:

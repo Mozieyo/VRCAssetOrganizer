@@ -16,6 +16,10 @@ from vrc_organizer.tools.registry import ToolRegistry
 class SettingsDialog(QDialog):
     def __init__(self, tool_registry: ToolRegistry, parent=None):
         super().__init__(parent)
+        # See note in TagDialog: without WA_DeleteOnClose, Qt parent-child
+        # ownership keeps every opened dialog alive for the lifetime of the
+        # main window.
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self._registry = tool_registry
         self.setWindowTitle("Settings")
         self.setMinimumSize(500, 400)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 from PySide6.QtCore import QSharedMemory, QSettings
+from PySide6.QtGui import QPixmapCache
 from PySide6.QtWidgets import QApplication
 import sys
 
@@ -58,12 +59,17 @@ class VrcApp(QApplication):
         super().__init__(argv)
         self.setOrganizationName("VrcAssetOrganizer")
         self.setApplicationName("VrcAssetOrganizer")
-        self.setApplicationVersion("0.1.0-alpha")
+        self.setApplicationVersion("0.1.1-alpha-hotfix")
 
         self.app_data_dir = get_app_data_dir()
         self.db_path = resolve_db_path()
         self.thumb_cache_dir = self.app_data_dir / "thumbnails"
         self.thumb_cache_dir.mkdir(exist_ok=True)
+
+        # Cap Qt's global pixmap cache (default is 10 MB). The grid model
+        # has its own per-asset cache and the only other heavy pixmap use
+        # is the inspector thumbnail. 4 MB is enough.
+        QPixmapCache.setCacheLimit(4 * 1024)
 
         self._shared_mem = ensure_single_instance()
 

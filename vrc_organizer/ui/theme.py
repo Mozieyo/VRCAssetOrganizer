@@ -71,7 +71,10 @@ QLineEdit {
     background: #1e293b;
     border: 1px solid #334155;
     border-radius: 3px;
-    padding: 6px 10px;
+    /* Symmetric vertical padding so JP descenders aren't clipped at the
+       bottom and there is no excess space at the top. */
+    padding: 3px 10px;
+    min-height: 22px;
     color: #e2e8f0;
     selection-background-color: #3b82f6;
 }
@@ -303,7 +306,8 @@ QLineEdit {
     background: white;
     border: 1px solid #94a3b8;
     border-radius: 3px;
-    padding: 6px 10px;
+    padding: 3px 10px;
+    min-height: 22px;
     color: #0f172a;
 }
 QLineEdit:focus {

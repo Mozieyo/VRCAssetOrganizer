@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QWidget, QFrame, QMessageBox,
+    QWidget, QFrame, QMessageBox, QFileDialog,
 )
 
 from vrc_organizer.database.queries import Queries
@@ -152,8 +152,12 @@ class CoverLabelerDialog(QDialog):
     """Fast cover selection. 1-6 or click to select, S = skip, Esc = done."""
     labeling_complete = Signal()
 
-    def __init__(self, queries: Queries, thumb_cache_dir: Path = None, parent=None):
+    def __init__(self, queries: Queries, thumb_cache_dir: Path = None,
+                 parent=None, single_asset: Asset | None = None):
         super().__init__(parent)
+        # See note in TagDialog: without WA_DeleteOnClose the dialog hangs
+        # around in MainWindow's child list after close.
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self._queries = queries
         self._cache = thumb_cache_dir
         self._assets: list[Asset] = []
@@ -161,8 +165,14 @@ class CoverLabelerDialog(QDialog):
         self._candidates: list[tuple[str, bytes, int, int]] = []
         self._cards: list[QWidget] = []
         self._labeled = 0
+        # Single-asset mode: dialog is scoped to one asset and closes after
+        # the choice is recorded. Triggered from the inspector's thumbnail
+        # double-click so the user can override the auto-picked cover.
+        self._single_asset = single_asset
+        self._history: list[int] = []
 
-        self.setWindowTitle("Select Cover")
+        title = "Change Cover" if single_asset else "Select Cover"
+        self.setWindowTitle(title)
         self.setMinimumSize(600, 420)
         self._build_ui()
         self._load_queue()
@@ -178,7 +188,7 @@ class CoverLabelerDialog(QDialog):
         self._progress.setStyleSheet("font-weight: bold; font-size: 14px;")
         top.addWidget(self._progress)
         top.addStretch()
-        hints = QLabel("1-6=Select  S=Skip  Esc=Done")
+        hints = QLabel("1-6=Select  S=Skip  Ctrl+Z=Back  Esc=Done")
         hints.setStyleSheet("color: #64748b; font-size: 11px;")
         top.addWidget(hints)
         root.addLayout(top)
@@ -203,6 +213,17 @@ class CoverLabelerDialog(QDialog):
         self._status.setStyleSheet("color: #64748b; font-size: 11px;")
         btm.addWidget(self._status)
         btm.addStretch()
+        self._back_btn = QPushButton("← Back")
+        self._back_btn.setMinimumWidth(80)
+        self._back_btn.setToolTip("Re-label the previous asset (Ctrl+Z)")
+        self._back_btn.setEnabled(False)
+        self._back_btn.clicked.connect(self._undo)
+        btm.addWidget(self._back_btn)
+        custom_btn = QPushButton("Custom...")
+        custom_btn.setMinimumWidth(80)
+        custom_btn.setToolTip("Pick any image file on disk as the cover")
+        custom_btn.clicked.connect(self._pick_custom_image)
+        btm.addWidget(custom_btn)
         skip = QPushButton("Skip")
         skip.setMinimumWidth(70)
         skip.clicked.connect(self._skip)
@@ -214,7 +235,10 @@ class CoverLabelerDialog(QDialog):
         root.addLayout(btm)
 
     def _load_queue(self):
-        self._assets = self._queries.get_unlabeled_cover_assets(limit=200)
+        if self._single_asset is not None:
+            self._assets = [self._single_asset]
+        else:
+            self._assets = self._queries.get_unlabeled_cover_assets(limit=200)
         if not self._assets:
             self._progress.setText("All done!")
             self._status.setText("No assets need cover labels.")
@@ -339,7 +363,73 @@ class CoverLabelerDialog(QDialog):
             filename_score=score,
             images_shown=len(self._candidates),
         )
+        self._history.append(asset.id)
         self._labeled += 1
+        if self._single_asset is not None:
+            self._finish()
+            return
+        self._next()
+
+    def _pick_custom_image(self):
+        """Let the user pick any image file off disk and use it as the
+        asset's cover. We copy the file into the thumbnail cache, point
+        the asset's thumbnail field at it, and record a cover-labels_v2
+        row stamped with the source path so the asset doesn't re-queue."""
+        if self._idx >= len(self._assets):
+            return
+        asset = self._assets[self._idx]
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a custom cover image", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All Files (*)",
+        )
+        if not path:
+            return
+        src = Path(path)
+        try:
+            with Image.open(src) as img:
+                # Convert to RGB to drop alpha that won't survive JPEG-style
+                # re-encodes downstream; keep palette assets working too.
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGBA")
+                w_px, h_px = img.size
+                if self._cache is None:
+                    QMessageBox.warning(
+                        self, "Thumb cache unavailable",
+                        "Thumbnail cache directory wasn't passed in. "
+                        "Cannot save a custom thumbnail.",
+                    )
+                    return
+                self._cache.mkdir(parents=True, exist_ok=True)
+                dest = self._cache / f"{asset.id}.png"
+                img.save(dest, format="PNG")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Couldn't load image",
+                f"Failed to read or save the picked image:\n{e}",
+            )
+            return
+
+        # Point the DB row at the saved file. State is 'ready' so the
+        # thumb worker won't try to regenerate it.
+        self._queries.update_thumbnail(asset.id, dest, state="ready")
+        # Stamp the source path into cover_labels_v2 so the labeler
+        # treats this asset as labeled and doesn't reshow it. Special
+        # marker prefix tells future logic this came from outside the
+        # archive — e.g., we won't try to extract it again.
+        self._queries.save_cover_label_v2(
+            asset_id=asset.id,
+            image_name=f"__custom__:{src.name}",
+            image_width=w_px,
+            image_height=h_px,
+            archive_depth=0,
+            filename_score=0,
+            images_shown=len(self._candidates),
+        )
+        self._history.append(asset.id)
+        self._labeled += 1
+        if self._single_asset is not None:
+            self._finish()
+            return
         self._next()
 
     def _skip(self):
@@ -356,7 +446,37 @@ class CoverLabelerDialog(QDialog):
             image_name="__skipped__",
             images_shown=len(self._candidates),
         )
+        self._history.append(asset.id)
+        if self._single_asset is not None:
+            self._finish()
+            return
         self._next()
+
+    def _undo(self):
+        """Re-show the previously-labeled asset so the user can change the
+        pick. We drop the previously-saved label row so re-selecting starts
+        from a clean slate (and so the asset would re-queue if the user
+        bailed without picking again)."""
+        if not self._history or self._single_asset is not None:
+            return
+        prev_id = self._history.pop()
+        self._queries.delete_cover_label(prev_id)
+        # Find the asset in the queue and rewind to it. If it's not in the
+        # queue (e.g. we already advanced past the buffer), inject it.
+        for i, a in enumerate(self._assets):
+            if a.id == prev_id:
+                self._idx = i
+                self._labeled = max(0, self._labeled - 1)
+                self._show()
+                self._back_btn.setEnabled(bool(self._history))
+                return
+        # Asset not in current buffer — fetch and prepend.
+        asset = self._queries.get_asset(prev_id)
+        if asset is not None:
+            self._assets.insert(self._idx, asset)
+            self._labeled = max(0, self._labeled - 1)
+            self._show()
+        self._back_btn.setEnabled(bool(self._history))
 
     def _next(self):
         self._idx += 1
@@ -364,6 +484,8 @@ class CoverLabelerDialog(QDialog):
             more = self._queries.get_unlabeled_cover_assets(limit=100)
             existing = {a.id for a in self._assets}
             self._assets.extend(a for a in more if a.id not in existing)
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setEnabled(bool(self._history))
         self._show()
 
     def _finish(self):
@@ -378,6 +500,8 @@ class CoverLabelerDialog(QDialog):
             self._finish()
         elif k == Qt.Key_S:
             self._skip()
+        elif k == Qt.Key_Z and e.modifiers() & Qt.ControlModifier:
+            self._undo()
         elif Qt.Key_1 <= k <= Qt.Key_6:
             self._select(k - Qt.Key_1)
         else:

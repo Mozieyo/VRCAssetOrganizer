@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
@@ -23,6 +24,7 @@ from vrc_organizer.database.queries import Queries
 from vrc_organizer.ui.theme import ThemeManager
 from vrc_organizer.ui.thumbnail_grid import (
     AssetListModel, ThumbnailDelegate, AssetListView, THUMB_SIZE,
+    set_show_romaji_cached,
 )
 from vrc_organizer.ui.inspector import InspectorPanel
 from vrc_organizer.ui.tag_dialog import TagDialog
@@ -140,7 +142,6 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         # Show romaji "furigana" alongside Japanese asset titles.
         # Persisted via QSettings so the preference survives a restart.
-        from PySide6.QtCore import QSettings
         self._show_romaji_action = view_menu.addAction("Show Romaji (furigana)")
         self._show_romaji_action.setCheckable(True)
         self._show_romaji_action.setChecked(
@@ -166,12 +167,32 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("Label Covers...", self._on_label_covers)
         tools_menu.addAction("Manage Tags...", self._on_manage_tags)
         tools_menu.addSeparator()
-        tools_menu.addAction("Export Training Data...", self._on_export_training)
-        tools_menu.addAction("Import Training Data...", self._on_import_training)
-        tools_menu.addAction("Crawl Folder for Training Signals...", self._on_crawl_training)
-        tools_menu.addSeparator()
-        tools_menu.addAction("Export Shared Tag Pool (for friends)...", self._on_export_pool)
-        tools_menu.addAction("Import Shared Tag Pool (from friends)...", self._on_import_pool)
+
+        # Training submenu — three related families:
+        #   1. Crawl folders to mine tag signals from filenames/archives
+        #   2. Share the cross-user-portable slice (tag pool) with friends
+        #   3. Back up / restore the full per-asset training data of THIS
+        #      library (cover labels + tag reviews). Not shareable; it's
+        #      effectively a personal training-data backup.
+        training_menu = tools_menu.addMenu("&Training")
+        training_menu.addAction(
+            "Crawl Folder for Training Signals...", self._on_crawl_training
+        )
+        training_menu.addSeparator()
+        training_menu.addAction(
+            "Share Tag Pool with a Friend...", self._on_export_pool
+        )
+        training_menu.addAction(
+            "Merge Tag Pool from a Friend...", self._on_import_pool
+        )
+        training_menu.addSeparator()
+        training_menu.addAction(
+            "Back Up This Library's Training Data...", self._on_export_training
+        )
+        training_menu.addAction(
+            "Restore Training Data Backup...", self._on_import_training
+        )
+
         tools_menu.addSeparator()
         tools_menu.addAction("Purge Cache && Packages...", self._on_purge_cache)
 
@@ -201,7 +222,6 @@ class MainWindow(QMainWindow):
         self._asset_count_label = QLabel("0 assets loaded")
         self._asset_count_label.setStyleSheet("color: palette(mid); font-size: 11px;")
 
-        from PySide6.QtCore import QSettings
         s = QSettings()
         saved_density = int(s.value("grid_density", 5))
         self._grid_slider = QSlider(Qt.Horizontal)
@@ -251,6 +271,10 @@ class MainWindow(QMainWindow):
         self._model = AssetListModel(self._queries)
 
         self._grid = AssetListView()
+        # Push the persisted density into the grid before setModel() so the
+        # first relayout uses the saved card width — otherwise cards render
+        # at the hardcoded default (5) until the user touches the slider.
+        self._grid.set_density(self._grid_slider.value())
         self._grid.setModel(self._model)
         self._grid.files_dropped.connect(self._on_files_dropped)
         self._grid.delete_requested.connect(self._on_delete_selected)
@@ -266,7 +290,9 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(grid_panel)
-        splitter.setSizes([220, 1060])
+        # Wider sidebar default so Avatars/Tags chips have room to wrap
+        # comfortably instead of stacking one chip per row.
+        splitter.setSizes([280, 1000])
 
         self.setCentralWidget(splitter)
 
@@ -285,6 +311,7 @@ class MainWindow(QMainWindow):
         self._inspector.notes_changed.connect(self._on_notes_save)
         self._inspector.open_with.connect(self._on_open_with)
         self._inspector.import_to_unity.connect(self._on_import_to_unity)
+        self._inspector.change_thumbnail.connect(self._on_change_thumbnail)
 
         self._inspector_dock = QDockWidget("Inspector", self)
         self._inspector_dock.setWidget(self._inspector)
@@ -294,7 +321,6 @@ class MainWindow(QMainWindow):
             QDockWidget.DockWidgetClosable
         )
         self._inspector.setMinimumWidth(360)
-        from PySide6.QtCore import QSettings
         saved_w = int(QSettings().value("inspector_width", 560))
         saved_w = max(360, min(1200, saved_w))
         self._inspector_dock.resize(saved_w, self._inspector_dock.height())
@@ -305,15 +331,24 @@ class MainWindow(QMainWindow):
         self.resizeDocks([self._inspector_dock], [saved_w], Qt.Horizontal)
         # Catch live resizes (drag the splitter) so the chosen width sticks.
         self._inspector_dock.installEventFilter(self)
+        # Coalesce QSettings writes from a drag into one settle write — the
+        # raw resize event fires once per pixel of cursor motion, so an
+        # eager write would touch the registry hundreds of times per drag.
+        self._dock_save_timer = QTimer(self)
+        self._dock_save_timer.setSingleShot(True)
+        self._dock_save_timer.setInterval(250)
+        self._dock_save_timer.timeout.connect(self._save_inspector_width)
+
+    def _save_inspector_width(self):
+        w = self._inspector_dock.width()
+        if w >= 360:
+            QSettings().setValue("inspector_width", int(w))
 
     def eventFilter(self, obj, event):
-        # Persist the inspector dock width on every resize. QDockWidget
+        # Schedule a debounced QSettings write on dock resize. QDockWidget
         # doesn't have a dedicated resize signal, so we hook the event.
         if obj is getattr(self, "_inspector_dock", None) and event.type() == event.Type.Resize:
-            from PySide6.QtCore import QSettings
-            w = self._inspector_dock.width()
-            if w >= 360:
-                QSettings().setValue("inspector_width", int(w))
+            self._dock_save_timer.start()
         return super().eventFilter(obj, event)
 
     # ── Status Bar ──────────────────────────────────────────
@@ -409,6 +444,9 @@ class MainWindow(QMainWindow):
         self._status_label.setText(
             f"Imported {len(asset_ids)} asset(s) — {self._model.rowCount()} total"
         )
+        # Imports can upsert (filename/size/mod_time changing on re-import),
+        # so drop the per-asset cache before refresh.
+        self._model.invalidate_caches()
         self._model.refresh()
         self._sidebar.refresh()
         self._grid.select_asset_ids(asset_ids)
@@ -430,7 +468,10 @@ class MainWindow(QMainWindow):
     def _on_thumbs_finished(self, found_ids: list[int]):
         self._thumb_worker = None
         if found_ids:
-            self._model.refresh()
+            # Thumb worker wrote new thumbnail paths for a known set of
+            # assets. Each row's cached Asset (and pixmap) is stale, but
+            # the filtered set is unchanged — redraw just those cards.
+            self._model.refresh_assets(found_ids)
         # Continue processing remaining pending thumbnails
         QTimer.singleShot(50, self._start_background_thumbs)
 
@@ -454,6 +495,7 @@ class MainWindow(QMainWindow):
             # safe path — keep the archive as one asset. Checking an entry
             # promotes that .unitypackage into its OWN asset card.
             dlg = QDialog(self)
+            dlg.setAttribute(Qt.WA_DeleteOnClose)
             dlg.setWindowTitle("Split Multi-Package Archive?")
             dlg.setMinimumWidth(440)
 
@@ -563,21 +605,45 @@ class MainWindow(QMainWindow):
     def _on_tag_add_request(self, asset_id: int, tag_id: int):
         self._do_add_tag(asset_id, tag_id)
 
+    def _has_active_tag_filter(self) -> bool:
+        """True if any tag-based filter is set on the grid model.
+
+        When no filter is active, a single tag add/remove can't move the
+        asset in or out of the visible set — so we can skip the full
+        SQL refresh and only redraw the one card. Search-text filter
+        also counts because filenames/tag-text could match.
+        """
+        return bool(
+            getattr(self, "_or_tag_filters", None)
+            or getattr(self, "_and_tag_filters", None)
+            or getattr(self, "_search_terms", None)
+        )
+
     def _on_tag_removed(self, asset_id: int, tag_id: int):
         self._queries.remove_tag_from_asset(asset_id, tag_id)
         self._refresh_inspector_for(asset_id)
-        self._sidebar.refresh()
-        self._model.refresh()
+        # Try the fast path first — chip count delta only. Falls back
+        # to a full rebuild if the chip isn't on screen yet.
+        if not self._sidebar.bump_tag_counts([tag_id], delta=-1):
+            self._sidebar.refresh()
+        if self._has_active_tag_filter():
+            self._model.refresh()
+        else:
+            self._model.refresh_asset(asset_id)
 
     def _on_tag_renamed(self, tag_id: int, new_name: str):
         self._queries.rename_tag(tag_id, new_name)
         self._sidebar.refresh()
-        self._model.refresh()
+        # Tag rename doesn't move any asset in/out of the filter and the
+        # grid cards don't display tag names, so no model refresh — the
+        # inspector pulls the new name on its own refresh.
         self._refresh_inspector()
 
     def _on_tag_deleted(self, tag_id: int):
         self._queries.delete_tag(tag_id)
         self._sidebar.refresh()
+        # Tag deletion can shift filter membership (if the deleted tag
+        # was in the active filter) — safer to do a full refresh.
         self._model.refresh()
         self._refresh_inspector()
 
@@ -588,8 +654,18 @@ class MainWindow(QMainWindow):
         if len(existing) >= 2:
             self._queries.record_tag_cooccurrence(existing)
         self._refresh_inspector_for(asset_id)
-        self._sidebar.refresh()
-        self._model.refresh()
+        # Fast path on the sidebar: just bump the chip count. Falls back
+        # to a full rebuild for tags that don't have a chip yet (newly
+        # created tag, count was at 0, etc.).
+        if not self._sidebar.bump_tag_counts([tag_id], delta=+1):
+            self._sidebar.refresh()
+        if self._has_active_tag_filter():
+            self._model.refresh()
+        else:
+            # Common case (genre swap, adding a tag with no filter
+            # active): nothing changes in the grid except this one
+            # card's cached state. Skip the full SQL refresh.
+            self._model.refresh_asset(asset_id)
 
     def _on_manage_tags(self):
         dlg = TagDialog(self._queries, self)
@@ -602,6 +678,10 @@ class MainWindow(QMainWindow):
 
     def _on_notes_save(self, asset_id: int, notes: str):
         self._queries.update_notes(asset_id, notes)
+        # The model's cached Asset has stale notes; drop it so the next
+        # inspector visit or grid tooltip pulls fresh data. Notes aren't
+        # rendered on the card itself, so no visible card update needed.
+        self._model.refresh_asset(asset_id)
 
     # ── Slots: Tools ────────────────────────────────────────
 
@@ -656,6 +736,7 @@ class MainWindow(QMainWindow):
                            asset_tags: list[str], asset_filetype: str):
         """Show a dialog to pick which running Unity Editor to target."""
         dlg = QDialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
         dlg.setWindowTitle("Select Unity Editor")
         dlg.setMinimumWidth(400)
         layout = QVBoxLayout(dlg)
@@ -804,14 +885,23 @@ class MainWindow(QMainWindow):
 
     def _on_grid_size_changed(self, value: int):
         # Slider 1 = smallest cards (most columns), 10 = largest cards.
-        from PySide6.QtCore import QSettings
-        QSettings().setValue("grid_density", int(value))
-        self._grid.set_density(value)
-        count = self._model.rowCount()
-        if count > 0:
-            self._model.dataChanged.emit(
-                self._model.index(0), self._model.index(count - 1), [Qt.DecorationRole]
+        # Debounce the QSettings write — dragging the slider fires this
+        # signal once per integer step.
+        self._pending_density = int(value)
+        if not hasattr(self, "_density_save_timer"):
+            self._density_save_timer = QTimer(self)
+            self._density_save_timer.setSingleShot(True)
+            self._density_save_timer.setInterval(250)
+            self._density_save_timer.timeout.connect(
+                lambda: QSettings().setValue("grid_density", self._pending_density)
             )
+        self._density_save_timer.start()
+        self._grid.set_density(value)
+        # Pull fresh pixmaps at the new resolution. Direct call to the view
+        # method instead of emitting model.dataChanged across every row —
+        # both do the same work, but the direct call skips Qt's signal
+        # bookkeeping for every visible card.
+        self._grid._refresh_card_data()  # type: ignore[attr-defined]
 
     # ── Menu actions ────────────────────────────────────────
 
@@ -844,7 +934,6 @@ class MainWindow(QMainWindow):
         # status report back). For now: spawn Unity with the package and
         # let the user pick a target project in Unity's import dialog.
         try:
-            import subprocess
             subprocess.Popen(
                 [unity_path, "-importPackage", str(asset.filepath)],
                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0),
@@ -859,8 +948,10 @@ class MainWindow(QMainWindow):
             )
 
     def _on_toggle_romaji(self, on: bool):
-        from PySide6.QtCore import QSettings
         QSettings().setValue("show_romaji", on)
+        # Keep the thumbnail-grid cache in sync — paintEvent reads from this
+        # cached value to avoid hitting QSettings on every redraw.
+        set_show_romaji_cached(on)
         # Force a redraw — cards repaint, inspector + tag review pick up the
         # setting on next show.
         self._grid.viewport().update()
@@ -884,6 +975,10 @@ class MainWindow(QMainWindow):
             self._queries.insert_scan_results(asset_id, report.contents)
         self._queries.update_scan_state(asset_id, "done")
         self._queries.update_thumbnail(asset_id, None, "pending")
+        # Was missing — the cached Asset has a stale thumbnail path now,
+        # and without this the grid card kept rendering the old thumb
+        # until some unrelated refresh kicked in.
+        self._model.refresh_asset(asset_id)
         self._refresh_inspector()
         self._start_background_thumbs()
         self._status_label.setText(f"Re-scanned: {asset.filename}")
@@ -1055,6 +1150,8 @@ class MainWindow(QMainWindow):
         if errors:
             parts.append(f"{len(errors)} error(s)")
         self._status_label.setText(f"Storage path updated — {', '.join(parts)}")
+        # Filepath fields on moved assets just changed — drop the cache.
+        self._model.invalidate_caches()
         self._model.refresh()
         self._sidebar.refresh()
 
@@ -1084,6 +1181,7 @@ class MainWindow(QMainWindow):
         affected_map = {a.id: a for a in affected}
 
         dlg = QDialog(self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
         dlg.setWindowTitle("Conflicts — Destination Already Has Files")
         dlg.setMinimumSize(520, 340)
         layout = QVBoxLayout(dlg)
@@ -1194,6 +1292,38 @@ class MainWindow(QMainWindow):
         dlg = CoverLabelerDialog(self._queries, self._app.thumb_cache_dir, self)
         dlg.labeling_complete.connect(self._regenerate_labeled_thumbs)
         dlg.exec()
+
+    def _on_change_thumbnail(self, asset_id: int):
+        """Inspector thumbnail was double-clicked — open the cover picker
+        scoped to a single asset. After the dialog closes, mark this asset's
+        thumbnail as pending and kick off the background worker so the new
+        cover replaces the old one in the grid + inspector."""
+        asset = self._queries.get_asset(asset_id)
+        if asset is None:
+            return
+        dlg = CoverLabelerDialog(
+            self._queries, self._app.thumb_cache_dir, self,
+            single_asset=asset,
+        )
+        dlg.exec()
+        label = self._queries.get_cover_label(asset_id)
+        if not label or label in ("__skipped__", "__cached__"):
+            return
+        if label.startswith("__custom__:"):
+            # The labeler already wrote the user-picked image to the
+            # thumb cache and set the asset's thumbnail field to ready.
+            # Don't requeue — that would let the thumb worker overwrite
+            # the custom image with a freshly-mined cover.
+            self._refresh_inspector_for(asset_id)
+            self._model.refresh_asset(asset_id)
+            return
+        self._queries.update_thumbnail(asset_id, None, "pending")
+        self._refresh_inspector_for(asset_id)
+        # Thumbnail field on this asset just changed — drop just this
+        # asset's cached copy so the grid picks up the new path on next
+        # paint. Other cards are unaffected.
+        self._model.refresh_asset(asset_id)
+        self._start_background_thumbs()
 
     def _regenerate_labeled_thumbs(self):
         count = self._queries.reset_thumbs_for_labeled()
@@ -1475,7 +1605,7 @@ class MainWindow(QMainWindow):
         # Re-seed default genre/avatar tags so the UI has something to bind to.
         self._seed_default_tags()
         QPixmapCache.clear()
-        self._model._pixmap_cache.clear()
+        self._model.invalidate_caches()
         self._model.refresh()
         self._sidebar.refresh()
         self._inspector.show_empty()

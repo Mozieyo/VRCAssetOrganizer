@@ -1,14 +1,18 @@
 ﻿from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from vrc_organizer.database.connection import DatabaseManager
 from vrc_organizer.models.asset import Asset
+from vrc_organizer.romaji import has_japanese, to_romaji
+from vrc_organizer.tag_data import GENRE_NAMES, LEGACY_GENRE_REMAP
 
 
 def asset_from_row(row: sqlite3.Row) -> Asset:
@@ -38,12 +42,19 @@ class Queries:
 
     def __init__(self, db: DatabaseManager):
         self._db = db
+        # One-shot cache for _romaji_extra_ids: count_assets() and
+        # list_assets() are called back-to-back with identical search
+        # strings (model.refresh() does both); cacheing the last result
+        # halves the asset table scan that drives romaji search.
+        self._romaji_cache_key: Optional[str] = None
+        self._romaji_cache_ids: list[int] = []
 
     # ── Asset CRUD ──────────────────────────────────────────
 
     def insert_asset(self, filename: str, filepath: Path, filetype: str,
                      file_size: int, mod_time: float, thumb_state: str = "pending",
                      thumbnail: Optional[Path] = None) -> int:
+        self._romaji_cache_key = None
         with self._db.write_connection() as conn:
             cur = conn.execute(
                 """INSERT INTO assets (filename, filepath, filetype, file_size,
@@ -68,6 +79,29 @@ class Queries:
             ).fetchone()
             return asset_from_row(row) if row else None
 
+    def get_assets_by_ids(self, asset_ids: list[int]) -> dict[int, Asset]:
+        """Bulk-fetch assets keyed by id. One SQL round trip per chunk of
+        999 ids (SQLite's default IN-clause limit). Used by the grid model
+        to prime its per-asset cache on filter change in a single query
+        instead of triggering N lazy SELECTs from _refresh_card_data."""
+        if not asset_ids:
+            return {}
+        out: dict[int, Asset] = {}
+        with self._db.connection() as conn:
+            chunk_size = 900
+            for i in range(0, len(asset_ids), chunk_size):
+                chunk = asset_ids[i:i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT * FROM assets WHERE id IN ({placeholders}) "
+                    "AND trash_date IS NULL",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    a = asset_from_row(r)
+                    out[a.id] = a
+        return out
+
     def get_asset_by_path(self, filepath: Path) -> Optional[Asset]:
         with self._db.connection() as conn:
             row = conn.execute(
@@ -90,7 +124,10 @@ class Queries:
         After cover labeling, this lets ThumbWorker regenerate thumbnails
         using the user-labeled cover image. We skip rows whose image_name
         is '__cached__' (the labeler's fallback marker meaning "no images
-        in the archive — keep the existing cached thumb").
+        in the archive — keep the existing cached thumb") or starts with
+        '__custom__:' (the user picked an outside-the-archive image and
+        we already wrote it to the thumb cache — regenerating would
+        overwrite their pick).
 
         We deliberately keep the existing `thumbnail` path so that if
         regeneration fails the old image still renders instead of leaving
@@ -100,7 +137,8 @@ class Queries:
             cur = conn.execute(
                 "UPDATE assets SET thumb_state = 'pending' "
                 "WHERE id IN (SELECT asset_id FROM cover_labels_v2 "
-                "             WHERE image_name NOT IN ('__cached__', '__skipped__')) "
+                "             WHERE image_name NOT IN ('__cached__', '__skipped__') "
+                "             AND image_name NOT LIKE '__custom__:%') "
                 "AND thumb_state IN ('ready', 'error') "
                 "AND trash_date IS NULL"
             )
@@ -135,6 +173,7 @@ class Queries:
             conn.commit()
 
     def delete_asset(self, asset_id: int):
+        self._romaji_cache_key = None
         with self._db.write_connection() as conn:
             conn.execute(
                 "UPDATE assets SET trash_date = strftime('%s', 'now') WHERE id = ?",
@@ -184,6 +223,57 @@ class Queries:
                 escaped.append(f"{term}*")
         return " AND ".join(escaped)
 
+    def _build_filter_clause(self, conn, filetypes, or_tag_ids,
+                              and_tag_ids, search_query):
+        """Build the shared WHERE clause used by list_assets, list_asset_ids,
+        and count_assets. Returns (sql_fragment, params).
+
+        Keeping this in one place means the three callers can't drift apart
+        — historically list_assets and count_assets each duplicated the
+        clause and only one of them learned about romaji search."""
+        sql = ""
+        params: list = []
+
+        if filetypes:
+            placeholders = ",".join("?" for _ in filetypes)
+            sql += f" AND filetype IN ({placeholders})"
+            params.extend(filetypes)
+
+        if or_tag_ids:
+            placeholders = ",".join("?" for _ in or_tag_ids)
+            sql += f" AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id IN ({placeholders}))"
+            params.extend(or_tag_ids)
+
+        if and_tag_ids:
+            for tid in and_tag_ids:
+                sql += " AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)"
+                params.append(tid)
+
+        if search_query:
+            # Asset matches if ANY of these hold:
+            #   1. FTS5 prefix match against filename/notes
+            #   2. Asset has at least one tag whose name contains the query
+            #      (case-insensitive substring)
+            #   3. Romanized filename contains the query (e.g. typing
+            #      "manuka" finds マヌカ.zip)
+            extra_ids = self._romaji_extra_ids(conn, search_query)
+            tag_like = f"%{search_query.strip()}%"
+            parts = [
+                "rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)",
+                ("id IN (SELECT at.asset_id FROM asset_tags at "
+                 "        JOIN tags t ON t.id = at.tag_id "
+                 "        WHERE t.name LIKE ? COLLATE NOCASE)"),
+            ]
+            sql_params = [self._fts5_prefix_query(search_query), tag_like]
+            if extra_ids:
+                placeholders = ",".join("?" for _ in extra_ids)
+                parts.append(f"id IN ({placeholders})")
+                sql_params.extend(extra_ids)
+            sql += " AND (" + " OR ".join(parts) + ")"
+            params.extend(sql_params)
+
+        return sql, params
+
     def list_assets(self, offset: int = 0, limit: int = 100,
                     filetypes: Optional[list[str]] = None,
                     or_tag_ids: Optional[list[int]] = None,
@@ -191,46 +281,40 @@ class Queries:
                     search_query: Optional[str] = None,
                     sort: str = "date_added DESC") -> list[Asset]:
         with self._db.connection() as conn:
-            query = "SELECT * FROM assets WHERE trash_date IS NULL"
-            params: list = []
-
-            if filetypes:
-                placeholders = ",".join("?" for _ in filetypes)
-                query += f" AND filetype IN ({placeholders})"
-                params.extend(filetypes)
-
-            if or_tag_ids:
-                placeholders = ",".join("?" for _ in or_tag_ids)
-                query += f" AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id IN ({placeholders}))"
-                params.extend(or_tag_ids)
-
-            if and_tag_ids:
-                for tid in and_tag_ids:
-                    query += " AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)"
-                    params.append(tid)
-
-            extra_ids = self._romaji_extra_ids(conn, search_query) if search_query else []
-            if search_query:
-                if extra_ids:
-                    placeholders = ",".join("?" for _ in extra_ids)
-                    query += (
-                        " AND ("
-                        " rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
-                        f" OR id IN ({placeholders})"
-                        " )"
-                    )
-                    params.append(self._fts5_prefix_query(search_query))
-                    params.extend(extra_ids)
-                else:
-                    query += " AND rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
-                    params.append(self._fts5_prefix_query(search_query))
-
+            where, params = self._build_filter_clause(
+                conn, filetypes, or_tag_ids, and_tag_ids, search_query,
+            )
             safe_sort = sort if sort in self._VALID_SORTS else "date_added DESC"
-            query += f" ORDER BY {safe_sort} LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-
+            query = (
+                "SELECT * FROM assets WHERE trash_date IS NULL"
+                + where + f" ORDER BY {safe_sort} LIMIT ? OFFSET ?"
+            )
+            params = params + [limit, offset]
             rows = conn.execute(query, params).fetchall()
             return [asset_from_row(r) for r in rows]
+
+    def list_asset_ids(self, filetypes: Optional[list[str]] = None,
+                       or_tag_ids: Optional[list[int]] = None,
+                       and_tag_ids: Optional[list[int]] = None,
+                       search_query: Optional[str] = None,
+                       sort: str = "date_added DESC") -> list[int]:
+        """Return every matching asset id in one query.
+
+        The grid view calls this on filter change so it can rebind cards
+        in a single SQL round trip — previously the model paginated 100 at
+        a time via fetchMore, which translated to 50 round trips for a
+        5000-asset library.
+        """
+        with self._db.connection() as conn:
+            where, params = self._build_filter_clause(
+                conn, filetypes, or_tag_ids, and_tag_ids, search_query,
+            )
+            safe_sort = sort if sort in self._VALID_SORTS else "date_added DESC"
+            query = (
+                "SELECT id FROM assets WHERE trash_date IS NULL"
+                + where + f" ORDER BY {safe_sort}"
+            )
+            return [r[0] for r in conn.execute(query, params).fetchall()]
 
     def _romaji_extra_ids(self, conn, search_query: str) -> list[int]:
         """Return asset ids whose ROMANIZED filename contains the query.
@@ -242,7 +326,8 @@ class Queries:
         q = (search_query or "").strip().lower()
         if not q or not q.isascii():
             return []
-        from vrc_organizer.romaji import to_romaji, has_japanese
+        if self._romaji_cache_key == q:
+            return self._romaji_cache_ids
         ids: list[int] = []
         rows = conn.execute(
             "SELECT id, filename FROM assets WHERE trash_date IS NULL"
@@ -252,6 +337,8 @@ class Queries:
             aid = r["id"] if isinstance(r, dict) else r[0]
             if has_japanese(name) and q in to_romaji(name).lower():
                 ids.append(aid)
+        self._romaji_cache_key = q
+        self._romaji_cache_ids = ids
         return ids
 
     def count_assets(self, filetypes: Optional[list[str]] = None,
@@ -259,40 +346,10 @@ class Queries:
                      and_tag_ids: Optional[list[int]] = None,
                      search_query: Optional[str] = None) -> int:
         with self._db.connection() as conn:
-            query = "SELECT COUNT(*) FROM assets WHERE trash_date IS NULL"
-            params: list = []
-
-            if filetypes:
-                placeholders = ",".join("?" for _ in filetypes)
-                query += f" AND filetype IN ({placeholders})"
-                params.extend(filetypes)
-
-            if or_tag_ids:
-                placeholders = ",".join("?" for _ in or_tag_ids)
-                query += f" AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id IN ({placeholders}))"
-                params.extend(or_tag_ids)
-
-            if and_tag_ids:
-                for tid in and_tag_ids:
-                    query += " AND id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)"
-                    params.append(tid)
-
-            if search_query:
-                extra_ids = self._romaji_extra_ids(conn, search_query)
-                if extra_ids:
-                    placeholders = ",".join("?" for _ in extra_ids)
-                    query += (
-                        " AND ("
-                        " rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
-                        f" OR id IN ({placeholders})"
-                        " )"
-                    )
-                    params.append(self._fts5_prefix_query(search_query))
-                    params.extend(extra_ids)
-                else:
-                    query += " AND rowid IN (SELECT rowid FROM assets_fts WHERE assets_fts MATCH ?)"
-                    params.append(self._fts5_prefix_query(search_query))
-
+            where, params = self._build_filter_clause(
+                conn, filetypes, or_tag_ids, and_tag_ids, search_query,
+            )
+            query = "SELECT COUNT(*) FROM assets WHERE trash_date IS NULL" + where
             return conn.execute(query, params).fetchone()[0]
 
     def count_by_type(self) -> list[tuple[str, int]]:
@@ -387,6 +444,14 @@ class Queries:
             ).fetchone()
             return (row[0], row[1], row[2]) if row else None
 
+    def get_tag_by_id(self, tag_id: int) -> tuple[int, str, str] | None:
+        """Return (id, name, color) for a tag by id, or None."""
+        with self._db.connection() as conn:
+            row = conn.execute(
+                "SELECT id, name, color FROM tags WHERE id = ?", (tag_id,)
+            ).fetchone()
+            return (row[0], row[1], row[2]) if row else None
+
     def delete_tag(self, tag_id: int):
         with self._db.write_connection() as conn:
             conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
@@ -430,7 +495,6 @@ class Queries:
         Genres are mutually exclusive — this is the atomic enforcement
         point. Returns the tag_id of the new genre.
         """
-        from vrc_organizer.tag_data import GENRE_NAMES
         with self._db.write_connection() as conn:
             cur = conn.execute("SELECT id FROM tags WHERE name = ?", (new_genre_name,))
             row = cur.fetchone()
@@ -464,6 +528,7 @@ class Queries:
         and the schema itself stay intact. Default tags re-seed on next launch
         via the main window's `_seed_default_tags`.
         """
+        self._romaji_cache_key = None
         counts: dict = {}
         with self._db.write_connection() as conn:
             for table in (
@@ -491,7 +556,6 @@ class Queries:
 
         Safe to run on every startup — it's a no-op once nothing matches.
         """
-        from vrc_organizer.tag_data import LEGACY_GENRE_REMAP
         if not LEGACY_GENRE_REMAP:
             return 0
         renamed = 0
@@ -671,7 +735,6 @@ class Queries:
         genre_tag_id: int | None
     ):
         """Save tag labeling session with ML training metadata."""
-        import json
         with self._db.write_connection() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO tag_labels
@@ -682,6 +745,23 @@ class Queries:
                  json.dumps(original_tags), json.dumps(accepted_tags),
                  json.dumps(rejected_tags), json.dumps(added_tags),
                  genre_tag_id)
+            )
+            conn.commit()
+
+    def delete_tag_label(self, asset_id: int):
+        """Drop the tag labeling session row for an asset so it shows up
+        again in get_unlabeled_tag_assets. Used by the tag labeler's undo
+        path so a re-reviewed asset gets re-queued."""
+        with self._db.write_connection() as conn:
+            conn.execute("DELETE FROM tag_labels WHERE asset_id = ?", (asset_id,))
+            conn.commit()
+
+    def delete_cover_label(self, asset_id: int):
+        """Drop the cover label row for an asset so it re-enters the
+        cover-label queue. Used by the cover labeler's undo path."""
+        with self._db.write_connection() as conn:
+            conn.execute(
+                "DELETE FROM cover_labels_v2 WHERE asset_id = ?", (asset_id,)
             )
             conn.commit()
 
@@ -730,7 +810,6 @@ class Queries:
         second time, so accidentally importing the same JSON 100 times can't
         multiply counts.
         """
-        import uuid
         with self._db.connection() as conn:
             cooc = conn.execute(
                 """SELECT t1.name, t2.name, tc.count

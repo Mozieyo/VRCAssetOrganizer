@@ -21,6 +21,10 @@ class TagDialog(QDialog):
 
     def __init__(self, queries: Queries, parent=None):
         super().__init__(parent)
+        # Auto-delete when the dialog closes — Qt's parent-child ownership
+        # would otherwise keep every dialog instance alive for the lifetime
+        # of the main window, which leaked ~20 MB per open.
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self._queries = queries
         self.setWindowTitle("Manage Tags")
         self.setMinimumSize(400, 350)

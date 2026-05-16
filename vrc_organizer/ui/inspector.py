@@ -4,27 +4,28 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QEvent, QTimer
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer, QSettings
 from PySide6.QtGui import QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
-    QFormLayout, QTreeWidget, QTreeWidgetItem, QLineEdit,
+    QFormLayout, QTreeWidget, QTreeWidgetItem, QLineEdit, QHeaderView,
     QPushButton, QScrollArea, QSizePolicy, QFrame, QMenu, QApplication,
     QDialog, QMessageBox,
 )
 
-from vrc_organizer.tag_data import ALL_AVATAR_NAMES, TOP_AVATARS, GENRE_NAMES
+from vrc_organizer.auto_tagger import suggest_tags
+from vrc_organizer.database.queries import Queries
+from vrc_organizer.models.asset import Asset
+from vrc_organizer.romaji import has_japanese, to_romaji
+from vrc_organizer.tag_data import (
+    ALL_AVATAR_NAMES, AVATAR_TAG_COLOR, TOP_AVATARS, GENRE_NAMES, is_avatar_tag,
+)
 from vrc_organizer.ui.chip_button import ChipToggleButton
 from vrc_organizer.ui.flow_layout import FlowLayout
-from vrc_organizer.romaji import has_japanese, to_romaji
 
 
 def _romaji_enabled() -> bool:
-    from PySide6.QtCore import QSettings
     return bool(QSettings().value("show_romaji", True, type=bool))
-
-from vrc_organizer.database.queries import Queries
-from vrc_organizer.models.asset import Asset
 
 
 def _format_size(size: int) -> str:
@@ -86,6 +87,28 @@ def _entry_icon(name: str, etype: str) -> str:
     if suffix in ("prefab",):
         return _TYPE_ICON["prefab"]
     return "•"
+
+
+class _ThumbnailLabel(QLabel):
+    """QLabel that emits `double_clicked` and exposes a hover affordance.
+
+    Used in the inspector header so the user can open the cover-change
+    dialog by double-clicking the thumbnail.
+    """
+
+    double_clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Double-click to change cover image")
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class TagChip(QFrame):
@@ -332,6 +355,7 @@ class InspectorPanel(QWidget):
     notes_changed = Signal(int, str)     # asset_id, notes
     open_with = Signal(str, Path, int)   # tool_name, filepath, asset_id
     import_to_unity = Signal(int)        # asset_id
+    change_thumbnail = Signal(int)       # asset_id — double-clicked thumb
 
     def __init__(self, queries: Queries, tool_registry=None, parent=None):
         super().__init__(parent)
@@ -354,12 +378,14 @@ class InspectorPanel(QWidget):
         # Header row: small thumbnail + filename (wraps, no truncation).
         header_row = QHBoxLayout()
         header_row.setSpacing(8)
-        self._thumb_label = QLabel()
+        self._thumb_label = _ThumbnailLabel()
         self._thumb_label.setFixedSize(56, 56)
         self._thumb_label.setAlignment(Qt.AlignCenter)
         self._thumb_label.setStyleSheet(
             "QLabel { background: palette(alternate-base); border-radius: 3px; }"
+            "QLabel:hover { background: palette(mid); }"
         )
+        self._thumb_label.double_clicked.connect(self._on_thumb_double_clicked)
         header_row.addWidget(self._thumb_label, 0, Qt.AlignTop)
         # Title column: filename + an optional romaji "furigana" line for
         # Japanese asset titles. The romaji label hides itself when there's
@@ -416,7 +442,6 @@ class InspectorPanel(QWidget):
             "QTreeView::item { padding-top: 1px; padding-bottom: 1px; }"
         )
         header = self._contents_tree.header()
-        from PySide6.QtWidgets import QHeaderView
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
@@ -468,7 +493,6 @@ class InspectorPanel(QWidget):
         avatar_layout = QVBoxLayout(avatar_group)
         self._avatar_search = QLineEdit()
         self._avatar_search.setPlaceholderText("Search avatars or press Enter to add a new one")
-        self._avatar_search.setFixedHeight(24)
         self._avatar_search.textChanged.connect(self._on_avatar_search)
         self._avatar_search.returnPressed.connect(self._on_avatar_search_submit)
         avatar_layout.addWidget(self._avatar_search)
@@ -499,7 +523,6 @@ class InspectorPanel(QWidget):
 
         self._tags_search = QLineEdit()
         self._tags_search.setPlaceholderText("Search tags or press Enter to add a new one")
-        self._tags_search.setFixedHeight(24)
         self._tags_search.textChanged.connect(self._on_tags_search)
         self._tags_search.returnPressed.connect(self._on_tags_search_submit)
         tags_layout.addWidget(self._tags_search)
@@ -860,7 +883,6 @@ class InspectorPanel(QWidget):
     ) -> list[tuple[int, str, str]]:
         if self._asset is None:
             return []
-        from vrc_organizer.auto_tagger import suggest_tags
 
         all_tags = self._queries.get_all_tags()
         by_id = {t[0]: (t[0], t[1], t[2]) for t in all_tags}  # tag_id → (id, name, color)
@@ -976,7 +998,9 @@ class InspectorPanel(QWidget):
         if query:
             # Query DB for avatar tags matching the search
             for tag_id, name, color, count in self._queries.get_all_tags():
-                if name in ALL_AVATAR_NAMES and name not in self._avatar_chips and query in name.lower():
+                if (is_avatar_tag(name, color)
+                        and name not in self._avatar_chips
+                        and query in name.lower()):
                     chip = ChipToggleButton(f"{name} ({count})")
                     chip.toggled.connect(lambda checked, n=name: self._on_avatar_chip_toggled(n, checked))
                     self._avatar_search_chips[name] = chip
@@ -997,7 +1021,7 @@ class InspectorPanel(QWidget):
         if not text:
             return
         existing = self._queries.get_tag_by_name(text)
-        tag_id = existing[0] if existing else self._queries.create_tag(text, "#8b5cf6")
+        tag_id = existing[0] if existing else self._queries.create_tag(text, AVATAR_TAG_COLOR)
         if tag_id:
             self.tag_added.emit(self._asset.id, tag_id)
         self._avatar_search.clear()
@@ -1051,6 +1075,14 @@ class InspectorPanel(QWidget):
         # "open in viewer" path now. Keep this method as a no-op so older
         # callers don't NameError.
         pass
+
+    def _on_thumb_double_clicked(self):
+        """Fire `change_thumbnail` so MainWindow can open the cover picker
+        scoped to this asset. Lives here because the inspector owns the
+        thumb label widget but doesn't know about the main window or the
+        thumbnail cache directory."""
+        if self._asset is not None:
+            self.change_thumbnail.emit(self._asset.id)
 
     def _on_import_to_unity(self):
         if self._asset is None:
@@ -1148,7 +1180,7 @@ class InspectorPanel(QWidget):
         if checked:
             if name in assigned:
                 return
-            tag_id = self._find_or_create_tag(name, "#8b5cf6")
+            tag_id = self._find_or_create_tag(name, AVATAR_TAG_COLOR)
             if tag_id:
                 self.tag_added.emit(self._asset.id, tag_id)
         else:
